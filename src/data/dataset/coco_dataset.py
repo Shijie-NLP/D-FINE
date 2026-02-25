@@ -32,6 +32,8 @@ class CocoDetection(FasterCocoDetection, DetDataset):
     def __init__(
         self, img_folder, ann_file, transforms, return_masks=False, remap_mscoco_category=False
     ):
+        img_folder = os.path.expanduser(img_folder)
+        ann_file = os.path.expanduser(ann_file)
         super(FasterCocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
