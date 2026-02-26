@@ -572,19 +572,9 @@ class DFINETransformer(nn.Module):
         #     layer = TransformerEncoderLayer(hidden_dim, nhead, dim_feedforward, activation='gelu')
         #     self.encoder = TransformerEncoder(layer, 1)
 
-        self.enc_output = nn.Sequential(
-            OrderedDict(
-                [
-                    ("proj", nn.Linear(hidden_dim, hidden_dim)),
-                    (
-                        "norm",
-                        nn.LayerNorm(
-                            hidden_dim,
-                        ),
-                    ),
-                ]
-            )
-        )
+        self.enc_output = nn.Sequential()
+        self.enc_output.add_module("proj", nn.Linear(hidden_dim, hidden_dim))
+        self.enc_output.add_module("norm", nn.LayerNorm(hidden_dim))
 
         if query_select_method == "agnostic":
             self.enc_score_head = nn.Linear(hidden_dim, 1)
@@ -664,21 +654,9 @@ class DFINETransformer(nn.Module):
             if in_channels == self.hidden_dim:
                 self.input_proj.append(nn.Identity())
             else:
-                self.input_proj.append(
-                    nn.Sequential(
-                        OrderedDict(
-                            [
-                                ("conv", nn.Conv2d(in_channels, self.hidden_dim, 1, bias=False)),
-                                (
-                                    "norm",
-                                    nn.BatchNorm2d(
-                                        self.hidden_dim,
-                                    ),
-                                ),
-                            ]
-                        )
-                    )
-                )
+                self.input_proj.append(nn.Sequential())
+                self.input_proj.add_module("conv", nn.Conv2d(in_channels, self.hidden_dim, 1, bias=False))
+                self.input_proj.add_module("norm", nn.BatchNorm2d(self.hidden_dim))
 
         in_channels = feat_channels[-1]
 
@@ -686,21 +664,10 @@ class DFINETransformer(nn.Module):
             if in_channels == self.hidden_dim:
                 self.input_proj.append(nn.Identity())
             else:
-                self.input_proj.append(
-                    nn.Sequential(
-                        OrderedDict(
-                            [
-                                (
-                                    "conv",
-                                    nn.Conv2d(
-                                        in_channels, self.hidden_dim, 3, 2, padding=1, bias=False
-                                    ),
-                                ),
-                                ("norm", nn.BatchNorm2d(self.hidden_dim)),
-                            ]
-                        )
-                    )
-                )
+                self.input_proj.append(nn.Sequential())
+                self.input_proj.add_module("conv",nn.Conv2d(in_channels, self.hidden_dim, 3, 2, padding=1, bias=False))
+                self.input_proj.add_module("norm", nn.BatchNorm2d(self.hidden_dim))
+
                 in_channels = self.hidden_dim
 
     def _get_encoder_input(self, feats: List[torch.Tensor]):

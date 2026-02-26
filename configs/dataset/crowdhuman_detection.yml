@@ -11,8 +11,8 @@ train_dataloader:
   type: DataLoader
   dataset:
     type: CocoDetection
-    img_folder: /data/CrowdHuman/coco/CrowdHuman_train
-    ann_file: /data/CrowdHuman/coco/Chuman-train.json
+    img_folder: ~/Data/datasets/CrowdHuman/coco/CrowdHuman_train
+    ann_file: ~/Data/datasets/CrowdHuman/coco/Chuman-train.json
     return_masks: False
     transforms:
       type: Compose
@@ -28,8 +28,8 @@ val_dataloader:
   type: DataLoader
   dataset:
     type: CocoDetection
-    img_folder: /data/CrowdHuman/coco/CrowdHuman_val
-    ann_file: /data/CrowdHuman/coco/Chuman-val.json
+    img_folder: ~/Data/datasets/CrowdHuman/coco/CrowdHuman_val
+    ann_file: ~/Data/datasets/CrowdHuman/coco/Chuman-val.json
     return_masks: False
     transforms:
       type: Compose
