@@ -24,13 +24,11 @@ __all__ = ["CocoDetection"]
 
 @register()
 class CocoDetection(FasterCocoDetection, DetDataset):
-    __inject__ = [
-        "transforms",
-    ]
+    __inject__ = ["transforms"]
     __share__ = ["remap_mscoco_category"]
 
     def __init__(
-        self, img_folder, ann_file, transforms, return_masks=False, remap_mscoco_category=False
+        self, img_folder, ann_file, transforms, return_masks=False, remap_mscoco_category=False, num_samples=None,
     ):
         img_folder = os.path.expanduser(img_folder)
         ann_file = os.path.expanduser(ann_file)
@@ -41,6 +39,9 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         self.ann_file = ann_file
         self.return_masks = return_masks
         self.remap_mscoco_category = remap_mscoco_category
+
+        if num_samples is not None:
+            self.ids = self.ids[:num_samples]
 
     def __getitem__(self, idx):
         img, target = self.load_item(idx)
@@ -81,27 +82,19 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         return s
 
     @property
-    def categories(
-        self,
-    ):
+    def categories(self):
         return self.coco.dataset["categories"]
 
     @property
-    def category2name(
-        self,
-    ):
+    def category2name(self):
         return {cat["id"]: cat["name"] for cat in self.categories}
 
     @property
-    def category2label(
-        self,
-    ):
+    def category2label(self):
         return {cat["id"]: i for i, cat in enumerate(self.categories)}
 
     @property
-    def label2category(
-        self,
-    ):
+    def label2category(self):
         return {i: cat["id"] for i, cat in enumerate(self.categories)}
 
 
