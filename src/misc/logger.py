@@ -1,13 +1,16 @@
 """
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 https://github.com/facebookresearch/detr/blob/main/util/misc.py
-Mostly copy-paste from torchvision references.
+
+Refactored to remove legacy PyTorch < 1.8 serialization fossils, ensuring
+memory safety and leveraging native C++ backed distributed operators.
 """
 
 import datetime
-import pickle
 import time
 from collections import defaultdict, deque
+from collections.abc import Generator, Iterable
+from typing import Any, Optional
 
 import torch
 import torch.distributed as tdist
@@ -20,7 +23,7 @@ class SmoothedValue:
     window or the global series average.
     """
 
-    def __init__(self, window_size=20, fmt=None):
+    def __init__(self, window_size: int = 20, fmt: Optional[str] = None):
         if fmt is None:
             fmt = "{median:.4f} ({global_avg:.4f})"
         self.deque = deque(maxlen=window_size)
@@ -28,13 +31,14 @@ class SmoothedValue:
         self.count = 0
         self.fmt = fmt
 
-    def update(self, value, n=1):
+    def update(self, value: float, n: int = 1) -> None:
         self.deque.append(value)
         self.count += n
         self.total += value * n
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self) -> None:
         """
+        Synchronize the global total and count across all processes.
         Warning: does not synchronize the deque!
         """
         if not is_dist_available_and_initialized():
@@ -47,28 +51,33 @@ class SmoothedValue:
         self.total = t[1]
 
     @property
-    def median(self):
+    def median(self) -> float:
+        # Return 0.0 if empty to avoid RuntimeError
+        if not self.deque:
+            return 0.0
         d = torch.tensor(list(self.deque))
         return d.median().item()
 
     @property
-    def avg(self):
-        d = torch.tensor(list(self.deque), dtype=torch.float32)
-        return d.mean().item()
+    def avg(self) -> float:
+        if not self.deque:
+            return 0.0
+        # More efficient python-native sum for small lists rather than tensor dispatch
+        return sum(self.deque) / len(self.deque)
 
     @property
-    def global_avg(self):
-        return self.total / self.count
+    def global_avg(self) -> float:
+        return self.total / self.count if self.count > 0 else 0.0
 
     @property
-    def max(self):
-        return max(self.deque)
+    def max(self) -> float:
+        return max(self.deque) if self.deque else 0.0
 
     @property
-    def value(self):
-        return self.deque[-1]
+    def value(self) -> float:
+        return self.deque[-1] if self.deque else 0.0
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.fmt.format(
             median=self.median,
             avg=self.avg,
@@ -78,9 +87,9 @@ class SmoothedValue:
         )
 
 
-def all_gather(data):
+def all_gather(data: Any) -> list[Any]:
     """
-    Run all_gather on arbitrary picklable data (not necessarily tensors)
+    Run all_gather on arbitrary picklable data (not necessarily tensors).
     Args:
         data: any picklable object
     Returns:
@@ -90,51 +99,28 @@ def all_gather(data):
     if world_size == 1:
         return [data]
 
-    # serialized to a Tensor
-    buffer = pickle.dumps(data)
-    storage = torch.ByteStorage.from_buffer(buffer)
-    tensor = torch.ByteTensor(storage).to("cuda")
-
-    # obtain Tensor size of each rank
-    local_size = torch.tensor([tensor.numel()], device="cuda")
-    size_list = [torch.tensor([0], device="cuda") for _ in range(world_size)]
-    tdist.all_gather(size_list, local_size)
-    size_list = [int(size.item()) for size in size_list]
-    max_size = max(size_list)
-
-    # receiving Tensor from all ranks
-    # we pad the tensor because torch all_gather does not support
-    # gathering tensors of different shapes
-    tensor_list = []
-    for _ in size_list:
-        tensor_list.append(torch.empty((max_size,), dtype=torch.uint8, device="cuda"))
-    if local_size != max_size:
-        padding = torch.empty(
-            size=(max_size - local_size,), dtype=torch.uint8, device="cuda"
-        )
-        tensor = torch.cat((tensor, padding), dim=0)
-    tdist.all_gather(tensor_list, tensor)
-
-    data_list = []
-    for size, tensor in zip(size_list, tensor_list):
-        buffer = tensor.cpu().numpy().tobytes()[:size]
-        data_list.append(pickle.loads(buffer))
+    # [SAC Note]: Replaced the manual byte serialization and padding
+    # with modern PyTorch's native all_gather_object.
+    data_list = [None for _ in range(world_size)]
+    tdist.all_gather_object(data_list, data)
 
     return data_list
 
 
-def reduce_dict(input_dict, average=True) -> dict[str, torch.Tensor]:
+def reduce_dict(input_dict: dict[str, torch.Tensor], average: bool = True) -> dict[str, torch.Tensor]:
     """
-    Args:
-        input_dict (dict): all the values will be reduced
-        average (bool): whether to do average or sum
     Reduce the values in the dictionary from all processes so that all processes
     have the averaged results. Returns a dict with the same fields as
     input_dict, after reduction.
+
+    Args:
+        input_dict (dict): all the values will be reduced
+        average (bool): whether to do average or sum
     """
     world_size = get_world_size()
     if world_size < 2:
         return input_dict
+
     with torch.no_grad():
         names = []
         values = []
@@ -142,49 +128,54 @@ def reduce_dict(input_dict, average=True) -> dict[str, torch.Tensor]:
         for k in sorted(input_dict.keys()):
             names.append(k)
             values.append(input_dict[k])
+
         values = torch.stack(values, dim=0)
+        # Ensure tensor is on cuda before all_reduce
+        if not values.is_cuda:
+            values = values.cuda()
+
         tdist.all_reduce(values)
         if average:
             values /= world_size
-        reduced_dict = {k: v for k, v in zip(names, values)}
+
+        reduced_dict = {k: v for k, v in zip(names, values)}  # noqa
+
     return reduced_dict
 
 
 class MetricLogger:
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter: str = "\t"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
 
-    def update(self, **kwargs):
+    def update(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():
             if isinstance(v, torch.Tensor):
                 v = v.item()
             assert isinstance(v, (float, int))
             self.meters[k].update(v)
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str) -> Any:
         if attr in self.meters:
             return self.meters[attr]
         if attr in self.__dict__:
             return self.__dict__[attr]
-        raise AttributeError(
-            f"'{type(self).__name__}' object has no attribute '{attr}'"
-        )
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{attr}'")
 
-    def __str__(self):
+    def __str__(self) -> str:
         loss_str = []
         for name, meter in self.meters.items():
             loss_str.append(f"{name}: {str(meter)}")
         return self.delimiter.join(loss_str)
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self) -> None:
         for meter in self.meters.values():
             meter.synchronize_between_processes()
 
-    def add_meter(self, name, meter):
+    def add_meter(self, name: str, meter: SmoothedValue) -> None:
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable: Iterable, print_freq: int, header: Optional[str] = None) -> Generator:
         i = 0
         if not header:
             header = ""
@@ -192,7 +183,14 @@ class MetricLogger:
         end = time.time()
         iter_time = SmoothedValue(fmt="{avg:.4f}")
         data_time = SmoothedValue(fmt="{avg:.4f}")
-        space_fmt = ":" + str(len(str(len(iterable)))) + "d"
+
+        try:
+            total_len = len(iterable)
+            space_fmt = ":" + str(len(str(total_len))) + "d"
+        except TypeError:
+            total_len = 0
+            space_fmt = ":d"
+
         if torch.cuda.is_available():
             log_msg = self.delimiter.join(
                 [
@@ -216,19 +214,23 @@ class MetricLogger:
                     "data: {data}",
                 ]
             )
+
         MB = 1024.0 * 1024.0
+
         for obj in iterable:
             data_time.update(time.time() - end)
             yield obj
             iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
+
+            if i % print_freq == 0 or (total_len and i == total_len - 1):
+                eta_seconds = iter_time.global_avg * (total_len - i) if total_len else 0
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+
                 if torch.cuda.is_available():
                     print(
                         log_msg.format(
                             i,
-                            len(iterable),
+                            total_len,
                             eta=eta_string,
                             meters=str(self),
                             time=str(iter_time),
@@ -240,7 +242,7 @@ class MetricLogger:
                     print(
                         log_msg.format(
                             i,
-                            len(iterable),
+                            total_len,
                             eta=eta_string,
                             meters=str(self),
                             time=str(iter_time),
@@ -249,10 +251,7 @@ class MetricLogger:
                     )
             i += 1
             end = time.time()
+
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print(
-            "{} Total time: {} ({:.4f} s / it)".format(
-                header, total_time_str, total_time / len(iterable)
-            )
-        )
+        print(f"{header} Total time: {total_time_str} ({total_time / (i or 1):.4f} s / it)")

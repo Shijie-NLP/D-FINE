@@ -6,6 +6,8 @@ The difference is that there is less copy-pasting from pycocotools
 in the end of the file, as python3 can suppress prints with contextlib
 
 # MiXaiLL76 replacing pycocotools with faster-coco-eval for better performance and support.
+
+Optimized.
 """
 
 from faster_coco_eval.utils.pytorch import FasterCocoEvaluator

@@ -100,11 +100,7 @@ def extract_schema(module: type) -> dict[str, Any]:
     return schema
 
 
-def create(
-    type_or_name: Union[type, str],
-    global_cfg: dict[str, Any] = GLOBAL_CONFIG,
-    **kwargs: Any,
-) -> Any:
+def create(type_or_name: Union[type, str], global_cfg: dict[str, Any] = GLOBAL_CONFIG, **kwargs: Any) -> Any:
     """
     Dynamically instantiates a registered object by resolving its schema,
     injecting dependencies recursively, and binding shared configurations.

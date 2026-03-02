@@ -11,8 +11,8 @@ from typing import Any, Optional, Union
 import PIL.Image
 import torch
 import torchvision
-import torchvision.transforms.v2 as T
-import torchvision.transforms.v2.functional as F
+import torchvision.transforms.v2 as T_v2
+import torchvision.transforms.v2.functional as F_v2
 from torchvision.tv_tensors import Image, Video
 
 from ...core import register
@@ -20,17 +20,17 @@ from .._misc import BoundingBoxes, Mask, _boxes_keys, convert_to_tv_tensor
 
 
 # Registering standard v2 transforms into the global workspace
-RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
-RandomZoomOut = register()(T.RandomZoomOut)
-RandomHorizontalFlip = register()(T.RandomHorizontalFlip)
-Resize = register()(T.Resize)
-SanitizeBoundingBoxes = register(name="SanitizeBoundingBoxes")(T.SanitizeBoundingBoxes)
-RandomCrop = register()(T.RandomCrop)
-Normalize = register()(T.Normalize)
+RandomPhotometricDistort = register()(T_v2.RandomPhotometricDistort)
+RandomZoomOut = register()(T_v2.RandomZoomOut)
+RandomHorizontalFlip = register()(T_v2.RandomHorizontalFlip)
+Resize = register()(T_v2.Resize)
+SanitizeBoundingBoxes = register(name="SanitizeBoundingBoxes")(T_v2.SanitizeBoundingBoxes)
+RandomCrop = register()(T_v2.RandomCrop)
+Normalize = register()(T_v2.Normalize)
 
 
 @register()
-class EmptyTransform(T.Transform):
+class EmptyTransform(T_v2.Transform):
     """A no-op transform that safely passes inputs through the pipeline."""
 
     def __init__(self) -> None:
@@ -41,7 +41,7 @@ class EmptyTransform(T.Transform):
 
 
 @register()
-class PadToSize(T.Pad):
+class PadToSize(T_v2.Pad):
     """
     Pads the input to a strictly defined spatial size.
     Crucial for batch collation in dense prediction architectures (e.g., FCOS, D-FINE).
@@ -69,7 +69,7 @@ class PadToSize(T.Pad):
 
     def _get_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
         """Dynamically calculates padding required to reach the target size."""
-        sp = F.get_spatial_size(flat_inputs[0])
+        sp = F_v2.get_spatial_size(flat_inputs[0])
         h_pad = self.size[1] - sp[0]
         w_pad = self.size[0] - sp[1]
 
@@ -83,7 +83,7 @@ class PadToSize(T.Pad):
         fill = self._fill[type(inpt)]
         padding = params["padding"]
         # type: ignore[arg-type] is preserved from the original codebase
-        return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
+        return F_v2.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
 
     def __call__(self, *inputs: Any) -> Any:
         """
@@ -99,7 +99,7 @@ class PadToSize(T.Pad):
 
 
 @register()
-class RandomIoUCrop(T.RandomIoUCrop):
+class RandomIoUCrop(T_v2.RandomIoUCrop):
     """
     Stochastic IoU-based cropping. Extended with an execution probability 'p'.
     """
@@ -134,7 +134,7 @@ class RandomIoUCrop(T.RandomIoUCrop):
 
 
 @register()
-class ConvertBoxes(T.Transform):
+class ConvertBoxes(T_v2.Transform):
     """
     Transforms bounding box formats and optionally normalizes them to [0, 1].
     Highly sensitive operation; critical for maintaining Tiny Object coordinates.
@@ -175,7 +175,7 @@ class ConvertBoxes(T.Transform):
 
 
 @register()
-class ConvertPILImage(T.Transform):
+class ConvertPILImage(T_v2.Transform):
     """
     Converts PIL Images to PyTorch Image Tensors with optimal hardware operations.
     """
@@ -191,7 +191,7 @@ class ConvertPILImage(T.Transform):
         return self._transform(inpt, params)
 
     def _transform(self, inpt: Any, params: dict[str, Any]) -> Any:
-        inpt = F.pil_to_tensor(inpt)
+        inpt = F_v2.pil_to_tensor(inpt)
 
         if self.dtype == "float32":
             inpt = inpt.float()
