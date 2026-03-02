@@ -423,10 +423,9 @@ class HybridEncoder(nn.Module):
         # Channel projection module
         self.input_proj = nn.ModuleList()
         for in_channel in in_channels:
-            proj = nn.Sequential(
-                nn.Conv2d(in_channel, hidden_dim, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden_dim),
-            )
+            proj = nn.Sequential()
+            proj.add_module("conv", nn.Conv2d(in_channel, hidden_dim, kernel_size=1, bias=False))
+            proj.add_module("norm", nn.BatchNorm2d(hidden_dim))
             self.input_proj.append(proj)
 
         # Transformer encoder module for the deepest features
