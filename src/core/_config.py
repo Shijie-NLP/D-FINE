@@ -1,10 +1,12 @@
 """
 Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
+
+Optimized for strict typing, memory safety, and framework compatibility.
 """
 
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional, Any
 
 import torch
 import torch.nn as nn
@@ -14,75 +16,86 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
-__all__ = [
-    "BaseConfig",
-]
+__all__ = ["BaseConfig"]
 
 
 class BaseConfig:
-    # TODO property
+    """
+    Base configuration class utilizing lazy initialization and strict property
+    setters to manage model, optimizers, and dataloaders for training pipelines.
+    """
 
     def __init__(self) -> None:
         super().__init__()
 
-        self.task: str = None
+        self.task: Optional[str] = None
 
-        # instance / function
-        self._model: nn.Module = None
-        self._postprocessor: nn.Module = None
-        self._criterion: nn.Module = None
-        self._optimizer: Optimizer = None
-        self._lr_scheduler: LRScheduler = None
-        self._lr_warmup_scheduler: LRScheduler = None
-        self._train_dataloader: DataLoader = None
-        self._val_dataloader: DataLoader = None
-        self._ema: nn.Module = None
-        self._scaler: GradScaler = None
-        self._train_dataset: Dataset = None
-        self._val_dataset: Dataset = None
-        self._collate_fn: Callable = None
-        self._evaluator: Callable[[nn.Module, DataLoader, str],] = None
-        self._writer: SummaryWriter = None
+        # Components (Lazy initialized via properties)
+        self._model: Optional[nn.Module] = None
+        self._postprocessor: Optional[nn.Module] = None
+        self._criterion: Optional[nn.Module] = None
+        self._optimizer: Optional[Optimizer] = None
+        self._lr_scheduler: Optional[LRScheduler] = None
+        self._lr_warmup_scheduler: Optional[LRScheduler] = None
+        self._train_dataloader: Optional[DataLoader] = None
+        self._val_dataloader: Optional[DataLoader] = None
+        self._ema: Optional[nn.Module] = None
+        self._scaler: Optional[GradScaler] = None
+        self._train_dataset: Optional[Dataset] = None
+        self._val_dataset: Optional[Dataset] = None
+        self._collate_fn: Optional[Callable] = None
+        self._evaluator: Optional[Callable[[nn.Module, DataLoader, str], Any]] = None
+        self._writer: Optional[SummaryWriter] = None
 
-        # dataset
+        # Dataset & Dataloader hyperparameters
         self.num_workers: int = 0
-        self.batch_size: int = None
-        self._train_batch_size: int = None
-        self._val_batch_size: int = None
-        self._train_shuffle: bool = None
-        self._val_shuffle: bool = None
+        self.batch_size: Optional[int] = None
+        self._train_batch_size: Optional[int] = None
+        self._val_batch_size: Optional[int] = None
+        self._train_shuffle: Optional[bool] = None
+        self._val_shuffle: Optional[bool] = None
 
-        # runtime
-        self.resume: str = None
-        self.tuning: str = None
+        # Runtime configuration
+        self.resume: Optional[str] = None
+        self.tuning: Optional[str] = None
 
-        self.epochs: int = None
+        self.epochs: Optional[int] = None
         self.last_epoch: int = -1
 
+        # Advanced training features
         self.use_amp: bool = False
         self.use_ema: bool = False
         self.ema_decay: float = 0.9999
         self.ema_warmups: int = 2000
         self.sync_bn: bool = False
         self.clip_max_norm: float = 0.0
-        self.find_unused_parameters: bool = None
+        self.find_unused_parameters: Optional[bool] = None
 
-        self.seed: int = None
-        self.print_freq: int = None
+        # Logging and I/O
+        self.seed: Optional[int] = None
+        self.print_freq: Optional[int] = None
         self.checkpoint_freq: int = 1
-        self.output_dir: str = None
-        self.summary_dir: str = None
+        self.output_dir: Optional[str] = None
+        self.summary_dir: Optional[str] = None
         self.device: str = ""
 
+    def _validate_type(self, obj: Any, expected_type: type) -> None:
+        """Internal helper to validate setter types efficiently."""
+        assert isinstance(obj, expected_type), (
+            f"Expected {expected_type.__name__}, but got {type(obj).__name__}. "
+            f"Please check your instantiation logic."
+        )
+
+    # =========================================================================
+    # Core Components Properties
+    # =========================================================================
     @property
     def model(self) -> nn.Module:
         return self._model
 
     @model.setter
-    def model(self, m):
-        assert isinstance(m, nn.Module), (
-            f"{type(m)} != nn.Module, please check your model class"
-        )
+    def model(self, m: nn.Module):
+        self._validate_type(m, nn.Module)
         self._model = m
 
     @property
@@ -90,10 +103,8 @@ class BaseConfig:
         return self._postprocessor
 
     @postprocessor.setter
-    def postprocessor(self, m):
-        assert isinstance(m, nn.Module), (
-            f"{type(m)} != nn.Module, please check your model class"
-        )
+    def postprocessor(self, m: nn.Module):
+        self._validate_type(m, nn.Module)
         self._postprocessor = m
 
     @property
@@ -101,10 +112,8 @@ class BaseConfig:
         return self._criterion
 
     @criterion.setter
-    def criterion(self, m):
-        assert isinstance(m, nn.Module), (
-            f"{type(m)} != nn.Module, please check your model class"
-        )
+    def criterion(self, m: nn.Module):
+        self._validate_type(m, nn.Module)
         self._criterion = m
 
     @property
@@ -112,10 +121,8 @@ class BaseConfig:
         return self._optimizer
 
     @optimizer.setter
-    def optimizer(self, m):
-        assert isinstance(m, Optimizer), (
-            f"{type(m)} != optim.Optimizer, please check your model class"
-        )
+    def optimizer(self, m: Optimizer):
+        self._validate_type(m, Optimizer)
         self._optimizer = m
 
     @property
@@ -123,10 +130,8 @@ class BaseConfig:
         return self._lr_scheduler
 
     @lr_scheduler.setter
-    def lr_scheduler(self, m):
-        assert isinstance(m, LRScheduler), (
-            f"{type(m)} != LRScheduler, please check your model class"
-        )
+    def lr_scheduler(self, m: LRScheduler):
+        self._validate_type(m, LRScheduler)
         self._lr_scheduler = m
 
     @property
@@ -134,9 +139,12 @@ class BaseConfig:
         return self._lr_warmup_scheduler
 
     @lr_warmup_scheduler.setter
-    def lr_warmup_scheduler(self, m):
+    def lr_warmup_scheduler(self, m: LRScheduler):
         self._lr_warmup_scheduler = m
 
+    # =========================================================================
+    # DataLoader & Dataset Properties (Lazy Instantiation)
+    # =========================================================================
     @property
     def train_dataloader(self) -> DataLoader:
         if self._train_dataloader is None and self.train_dataset is not None:
@@ -147,18 +155,23 @@ class BaseConfig:
                 collate_fn=self.collate_fn,
                 shuffle=self.train_shuffle,
             )
+            # Preserving original custom attribute injection logic
             loader.shuffle = self.train_shuffle
             self._train_dataloader = loader
 
         return self._train_dataloader
 
     @train_dataloader.setter
-    def train_dataloader(self, loader):
+    def train_dataloader(self, loader: DataLoader):
         self._train_dataloader = loader
 
     @property
     def val_dataloader(self) -> DataLoader:
         if self._val_dataloader is None and self.val_dataset is not None:
+            # Bug fix & optimization: PyTorch raises RuntimeError if
+            # persistent_workers=True while num_workers=0.
+            persistent = self.num_workers > 0
+
             loader = DataLoader(
                 self.val_dataset,
                 batch_size=self.val_batch_size,
@@ -166,27 +179,32 @@ class BaseConfig:
                 drop_last=False,
                 collate_fn=self.collate_fn,
                 shuffle=self.val_shuffle,
-                persistent_workers=True,
+                persistent_workers=persistent,
             )
+            # Preserving original custom attribute injection logic
             loader.shuffle = self.val_shuffle
             self._val_dataloader = loader
 
         return self._val_dataloader
 
     @val_dataloader.setter
-    def val_dataloader(self, loader):
+    def val_dataloader(self, loader: DataLoader):
         self._val_dataloader = loader
 
+    # =========================================================================
+    # Advanced Training Features (EMA, AMP)
+    # =========================================================================
     @property
     def ema(self) -> nn.Module:
         if self._ema is None and self.use_ema and self.model is not None:
+            # Lazy import to prevent circular dependencies at module initialization
             from ..optim import ModelEMA
 
             self._ema = ModelEMA(self.model, self.ema_decay, self.ema_warmups)
         return self._ema
 
     @ema.setter
-    def ema(self, obj):
+    def ema(self, obj: nn.Module):
         self._ema = obj
 
     @property
@@ -199,6 +217,9 @@ class BaseConfig:
     def scaler(self, obj: GradScaler):
         self._scaler = obj
 
+    # =========================================================================
+    # Granular Parameter Properties (Shuffle, Batch Size, etc.)
+    # =========================================================================
     @property
     def val_shuffle(self) -> bool:
         if self._val_shuffle is None:
@@ -207,8 +228,8 @@ class BaseConfig:
         return self._val_shuffle
 
     @val_shuffle.setter
-    def val_shuffle(self, shuffle):
-        assert isinstance(shuffle, bool), "shuffle must be bool"
+    def val_shuffle(self, shuffle: bool):
+        self._validate_type(shuffle, bool)
         self._val_shuffle = shuffle
 
     @property
@@ -219,8 +240,8 @@ class BaseConfig:
         return self._train_shuffle
 
     @train_shuffle.setter
-    def train_shuffle(self, shuffle):
-        assert isinstance(shuffle, bool), "shuffle must be bool"
+    def train_shuffle(self, shuffle: bool):
+        self._validate_type(shuffle, bool)
         self._train_shuffle = shuffle
 
     @property
@@ -231,8 +252,8 @@ class BaseConfig:
         return self._train_batch_size
 
     @train_batch_size.setter
-    def train_batch_size(self, batch_size):
-        assert isinstance(batch_size, int), "batch_size must be int"
+    def train_batch_size(self, batch_size: int):
+        self._validate_type(batch_size, int)
         self._train_batch_size = batch_size
 
     @property
@@ -243,8 +264,8 @@ class BaseConfig:
         return self._val_batch_size
 
     @val_batch_size.setter
-    def val_batch_size(self, batch_size):
-        assert isinstance(batch_size, int), "batch_size must be int"
+    def val_batch_size(self, batch_size: int):
+        self._validate_type(batch_size, int)
         self._val_batch_size = batch_size
 
     @property
@@ -252,8 +273,8 @@ class BaseConfig:
         return self._train_dataset
 
     @train_dataset.setter
-    def train_dataset(self, dataset):
-        assert isinstance(dataset, Dataset), f"{type(dataset)} must be Dataset"
+    def train_dataset(self, dataset: Dataset):
+        self._validate_type(dataset, Dataset)
         self._train_dataset = dataset
 
     @property
@@ -261,8 +282,8 @@ class BaseConfig:
         return self._val_dataset
 
     @val_dataset.setter
-    def val_dataset(self, dataset):
-        assert isinstance(dataset, Dataset), f"{type(dataset)} must be Dataset"
+    def val_dataset(self, dataset: Dataset):
+        self._validate_type(dataset, Dataset)
         self._val_dataset = dataset
 
     @property
@@ -270,8 +291,8 @@ class BaseConfig:
         return self._collate_fn
 
     @collate_fn.setter
-    def collate_fn(self, fn):
-        assert isinstance(fn, Callable), f"{type(fn)} must be Callable"
+    def collate_fn(self, fn: Callable):
+        self._validate_type(fn, Callable)
         self._collate_fn = fn
 
     @property
@@ -279,27 +300,34 @@ class BaseConfig:
         return self._evaluator
 
     @evaluator.setter
-    def evaluator(self, fn):
-        assert isinstance(fn, Callable), f"{type(fn)} must be Callable"
+    def evaluator(self, fn: Callable):
+        self._validate_type(fn, Callable)
         self._evaluator = fn
 
+    # =========================================================================
+    # Utilities
+    # =========================================================================
     @property
     def writer(self) -> SummaryWriter:
         if self._writer is None:
             if self.summary_dir:
                 self._writer = SummaryWriter(self.summary_dir)
             elif self.output_dir:
+                # Cast Path object to string explicitly if needed by older PyTorch versions,
+                # though modern PyTorch supports Path.
                 self._writer = SummaryWriter(Path(self.output_dir) / "summary")
         return self._writer
 
     @writer.setter
-    def writer(self, m):
-        assert isinstance(m, SummaryWriter), f"{type(m)} must be SummaryWriter"
+    def writer(self, m: SummaryWriter):
+        self._validate_type(m, SummaryWriter)
         self._writer = m
 
-    def __repr__(self):
-        s = ""
-        for k, v in self.__dict__.items():
-            if not k.startswith("_"):
-                s += f"{k}: {v}\n"
-        return s
+    def __repr__(self) -> str:
+        """
+        Optimized string representation using generator expression and string
+        joining for O(N) memory allocation efficiency.
+        """
+        return "".join(
+            f"{k}: {v}\n" for k, v in self.__dict__.items() if not k.startswith("_")
+        )

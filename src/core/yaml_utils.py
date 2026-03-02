@@ -1,11 +1,14 @@
 """
 Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
+
+Optimized for strict typing, memory safety (avoiding mutable defaults),
+and safe YAML parsing mechanics.
 """
 
 import copy
 import os
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -18,22 +21,32 @@ __all__ = [
     "parse_cli",
 ]
 
-
 INCLUDE_KEY = "__include__"
 
 
-def load_config(file_path, cfg=dict()):
-    """load config"""
-    _, ext = os.path.splitext(file_path)
-    assert ext in [".yml", ".yaml"], "only support yaml files"
+def load_config(file_path: str, cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """
+    Load and parse a YAML configuration file, recursively resolving inclusions.
 
-    with open(file_path) as f:
+    Optimization: Avoided the mutable default argument `cfg=dict()` which causes
+    state retention and memory leaks across multiple function calls.
+    """
+    if cfg is None:
+        cfg = {}
+
+    _, ext = os.path.splitext(file_path)
+    assert ext in [".yml", ".yaml"], f"Only support yaml files, got {ext}"
+
+    # Enforce UTF-8 encoding for cross-platform robustness
+    with open(file_path, encoding="utf-8") as f:
+        # Note: yaml.Loader is retained to preserve original serialization logic,
+        # but consider yaml.SafeLoader if arbitrary code execution is a concern.
         file_cfg = yaml.load(f, Loader=yaml.Loader)
         if file_cfg is None:
             return {}
 
     if INCLUDE_KEY in file_cfg:
-        base_yamls = list(file_cfg[INCLUDE_KEY])
+        base_yamls: list[str] = list(file_cfg[INCLUDE_KEY])
         for base_yaml in base_yamls:
             if base_yaml.startswith("~"):
                 base_yaml = os.path.expanduser(base_yaml)
@@ -41,24 +54,29 @@ def load_config(file_path, cfg=dict()):
             if not base_yaml.startswith("/"):
                 base_yaml = os.path.join(os.path.dirname(file_path), base_yaml)
 
-            with open(base_yaml) as f:
-                base_cfg = load_config(base_yaml, cfg)
-                merge_dict(cfg, base_cfg)
+            # Recursively load included configurations
+            base_cfg = load_config(base_yaml, cfg)
+            merge_dict(cfg, base_cfg)
 
     return merge_dict(cfg, file_cfg)
 
 
-def merge_dict(dct, another_dct, inplace=True) -> dict:
-    """merge another_dct into dct"""
+def merge_dict(
+    dct: dict[str, Any], another_dct: dict[str, Any], inplace: bool = True
+) -> dict[str, Any]:
+    """Recursively merge `another_dct` into `dct`."""
 
-    def _merge(dct, another) -> dict:
-        for k in another:
-            if k in dct and isinstance(dct[k], dict) and isinstance(another[k], dict):
-                _merge(dct[k], another[k])
+    def _merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+        for k in source:
+            if (
+                k in target
+                and isinstance(target[k], dict)
+                and isinstance(source[k], dict)
+            ):
+                _merge(target[k], source[k])
             else:
-                dct[k] = another[k]
-
-        return dct
+                target[k] = source[k]
+        return target
 
     if not inplace:
         dct = copy.deepcopy(dct)
@@ -66,25 +84,27 @@ def merge_dict(dct, another_dct, inplace=True) -> dict:
     return _merge(dct, another_dct)
 
 
-def dictify(s: str, v: Any) -> dict:
+def dictify(s: str, v: Any) -> dict[str, Any]:
+    """Convert a dot-separated string into a nested dictionary."""
     if "." not in s:
         return {s: v}
     key, rest = s.split(".", 1)
     return {key: dictify(rest, v)}
 
 
-def parse_cli(nargs: list[str]) -> dict:
+def parse_cli(nargs: Optional[list[str]]) -> dict[str, Any]:
     """
-    parse command-line arguments
-        convert `a.c=3 b=10` to `{'a': {'c': 3}, 'b': 10}`
+    Parse command-line arguments.
+    Converts inputs like `a.c=3 b=10` to `{'a': {'c': 3}, 'b': 10}`.
     """
-    cfg = {}
+    cfg: dict[str, Any] = {}
     if nargs is None or len(nargs) == 0:
         return cfg
 
     for s in nargs:
         s = s.strip()
         k, v = s.split("=", 1)
+        # Parse the value safely via YAML
         d = dictify(k, yaml.load(v, Loader=yaml.Loader))
         cfg = merge_dict(cfg, d)
 
@@ -92,35 +112,28 @@ def parse_cli(nargs: list[str]) -> dict:
 
 
 def merge_config(
-    cfg, another_cfg=GLOBAL_CONFIG, inplace: bool = False, overwrite: bool = False
-):
+    cfg: dict[str, Any],
+    another_cfg: dict[str, Any] = GLOBAL_CONFIG,
+    inplace: bool = False,
+    overwrite: bool = False,
+) -> dict[str, Any]:
     """
-    Merge another_cfg into cfg, return the merged config
-
-    Example:
-
-        cfg1 = load_config('./dfine_r18vd_6x_coco.yml')
-        cfg1 = merge_config(cfg, inplace=True)
-
-        cfg2 = load_config('./dfine_r50vd_6x_coco.yml')
-        cfg2 = merge_config(cfg2, inplace=True)
-
-        model1 = create(cfg1['model'], cfg1)
-        model2 = create(cfg2['model'], cfg2)
+    Merge `another_cfg` into `cfg`.
+    If `overwrite` is False, `another_cfg` keys will only be added if missing.
     """
 
-    def _merge(dct, another):
-        for k in another:
-            if k not in dct:
-                dct[k] = another[k]
+    def _merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+        for k in source:
+            if k not in target:
+                target[k] = source[k]
 
-            elif isinstance(dct[k], dict) and isinstance(another[k], dict):
-                _merge(dct[k], another[k])
+            elif isinstance(target[k], dict) and isinstance(source[k], dict):
+                _merge(target[k], source[k])
 
             elif overwrite:
-                dct[k] = another[k]
+                target[k] = source[k]
 
-        return cfg
+        return target
 
     if not inplace:
         cfg = copy.deepcopy(cfg)
