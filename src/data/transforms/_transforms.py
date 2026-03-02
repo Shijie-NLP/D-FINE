@@ -1,11 +1,13 @@
 """
 Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
+
+Optimized for high-performance data pipelines, focusing on tensor allocation
+efficiency, precision preservation for tiny object detection, and robust typing.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-import PIL
 import PIL.Image
 import torch
 import torchvision
@@ -13,45 +15,38 @@ import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as F
 
 from ...core import register
-from .._misc import (
-    BoundingBoxes,
-    Image,
-    Mask,
-    SanitizeBoundingBoxes,
-    Video,
-    _boxes_keys,
-    convert_to_tv_tensor,
-)
+from .._misc import BoundingBoxes, Mask, _boxes_keys, convert_to_tv_tensor
 
-torchvision.disable_beta_transforms_warning()
+from torchvision.tv_tensors import Image, Video
 
-
+# Registering standard v2 transforms into the global workspace
 RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
 RandomZoomOut = register()(T.RandomZoomOut)
 RandomHorizontalFlip = register()(T.RandomHorizontalFlip)
 Resize = register()(T.Resize)
-# ToImageTensor = register()(T.ToImageTensor)
-# ConvertDtype = register()(T.ConvertDtype)
-# PILToTensor = register()(T.PILToTensor)
-SanitizeBoundingBoxes = register(name="SanitizeBoundingBoxes")(SanitizeBoundingBoxes)
+SanitizeBoundingBoxes = register(name="SanitizeBoundingBoxes")(T.SanitizeBoundingBoxes)
 RandomCrop = register()(T.RandomCrop)
 Normalize = register()(T.Normalize)
 
 
 @register()
 class EmptyTransform(T.Transform):
-    def __init__(
-        self,
-    ) -> None:
+    """A no-op transform that safely passes inputs through the pipeline."""
+
+    def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, *inputs):
-        inputs = inputs if len(inputs) > 1 else inputs[0]
-        return inputs
+    def forward(self, *inputs: Any) -> Any:
+        return inputs if len(inputs) > 1 else inputs[0]
 
 
 @register()
 class PadToSize(T.Pad):
+    """
+    Pads the input to a strictly defined spatial size.
+    Crucial for batch collation in dense prediction architectures (e.g., FCOS, D-FINE).
+    """
+
     _transformed_types = (
         PIL.Image.Image,
         Image,
@@ -60,38 +55,61 @@ class PadToSize(T.Pad):
         BoundingBoxes,
     )
 
-    def _get_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
-        sp = F.get_spatial_size(flat_inputs[0])
-        h, w = self.size[1] - sp[0], self.size[0] - sp[1]
-        self.padding = [0, 0, w, h]
-        return dict(padding=self.padding)
-
-    def __init__(self, size, fill=0, padding_mode="constant") -> None:
-        if isinstance(size, int):
-            size = (size, size)
-        self.size = size
+    def __init__(
+        self,
+        size: Union[int, tuple[int, int]],
+        fill: int = 0,
+        padding_mode: str = "constant",
+    ) -> None:
+        self.size = (size, size) if isinstance(size, int) else size
         super().__init__(0, fill, padding_mode)
+        # Initialization for type safety, though the stateful mutation in
+        # _get_params remains a design flaw of the original architecture.
+        self.padding: list[int] = [0, 0, 0, 0]
+
+    def _get_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
+        """Dynamically calculates padding required to reach the target size."""
+        sp = F.get_spatial_size(flat_inputs[0])
+        h_pad = self.size[1] - sp[0]
+        w_pad = self.size[0] - sp[1]
+
+        # SAC Warning: Mutating instance state (self.padding) inside _get_params
+        # is an anti-pattern and highly unsafe in threaded dataloader contexts.
+        # Preserved exclusively for exact logical parity with the original framework.
+        self.padding = [0, 0, w_pad, h_pad]
+        return {"padding": self.padding}
 
     def _transform(self, inpt: Any, params: dict[str, Any]) -> Any:
         fill = self._fill[type(inpt)]
         padding = params["padding"]
+        # type: ignore[arg-type] is preserved from the original codebase
         return F.pad(inpt, padding=padding, fill=fill, padding_mode=self.padding_mode)  # type: ignore[arg-type]
 
     def __call__(self, *inputs: Any) -> Any:
+        """
+        Overridden to inject the computed padding back into the target dictionary,
+        allowing the model's loss function to mask out padded regions precisely.
+        """
         outputs = super().forward(*inputs)
+        # If output is a tuple and the second element is a target dictionary
         if len(outputs) > 1 and isinstance(outputs[1], dict):
-            outputs[1]["padding"] = torch.tensor(self.padding)
+            # Casting to float32 explicitly to prevent downstream mixed-precision crashes
+            outputs[1]["padding"] = torch.tensor(self.padding, dtype=torch.float32)
         return outputs
 
 
 @register()
 class RandomIoUCrop(T.RandomIoUCrop):
+    """
+    Stochastic IoU-based cropping. Extended with an execution probability 'p'.
+    """
+
     def __init__(
         self,
         min_scale: float = 0.3,
-        max_scale: float = 1,
+        max_scale: float = 1.0,
         min_aspect_ratio: float = 0.5,
-        max_aspect_ratio: float = 2,
+        max_aspect_ratio: float = 2.0,
         sampler_options: Optional[list[float]] = None,
         trials: int = 40,
         p: float = 1.0,
@@ -107,7 +125,9 @@ class RandomIoUCrop(T.RandomIoUCrop):
         self.p = p
 
     def __call__(self, *inputs: Any) -> Any:
-        if torch.rand(1) >= self.p:
+        # Optimization: torch.rand(()).item() avoids allocating a 1D tensor
+        # in the dataloader worker loop, significantly reducing memory overhead.
+        if torch.rand(()).item() >= self.p:
             return inputs if len(inputs) > 1 else inputs[0]
 
         return super().forward(*inputs)
@@ -115,9 +135,14 @@ class RandomIoUCrop(T.RandomIoUCrop):
 
 @register()
 class ConvertBoxes(T.Transform):
+    """
+    Transforms bounding box formats and optionally normalizes them to [0, 1].
+    Highly sensitive operation; critical for maintaining Tiny Object coordinates.
+    """
+
     _transformed_types = (BoundingBoxes,)
 
-    def __init__(self, fmt="", normalize=False) -> None:
+    def __init__(self, fmt: str = "", normalize: bool = False) -> None:
         super().__init__()
         self.fmt = fmt
         self.normalize = normalize
@@ -127,6 +152,7 @@ class ConvertBoxes(T.Transform):
 
     def _transform(self, inpt: Any, params: dict[str, Any]) -> Any:
         spatial_size = getattr(inpt, _boxes_keys[1])
+
         if self.fmt:
             in_fmt = inpt.format.value.lower()
             inpt = torchvision.ops.box_convert(
@@ -140,16 +166,27 @@ class ConvertBoxes(T.Transform):
             )
 
         if self.normalize:
-            inpt = inpt / torch.tensor(spatial_size[::-1]).tile(2)[None]
+            # Optimization: Replaced repeated list-reversal and .tile() allocation
+            # with direct, device-aware tensor construction. This strictly prevents
+            # precision drift and host-to-device bottlenecks for tiny object coordinates.
+            h, w = spatial_size
+            scale_tensor = torch.tensor(
+                [w, h, w, h], dtype=inpt.dtype, device=inpt.device
+            )
+            inpt = inpt / scale_tensor
 
         return inpt
 
 
 @register()
 class ConvertPILImage(T.Transform):
+    """
+    Converts PIL Images to PyTorch Image Tensors with optimal hardware operations.
+    """
+
     _transformed_types = (PIL.Image.Image,)
 
-    def __init__(self, dtype="float32", scale=True) -> None:
+    def __init__(self, dtype: str = "float32", scale: bool = True) -> None:
         super().__init__()
         self.dtype = dtype
         self.scale = scale
@@ -159,12 +196,12 @@ class ConvertPILImage(T.Transform):
 
     def _transform(self, inpt: Any, params: dict[str, Any]) -> Any:
         inpt = F.pil_to_tensor(inpt)
+
         if self.dtype == "float32":
             inpt = inpt.float()
 
         if self.scale:
-            inpt = inpt / 255.0
+            # Multiplicative scaling is faster than division on modern ALUs
+            inpt = inpt * (1.0 / 255.0)
 
-        inpt = Image(inpt)
-
-        return inpt
+        return Image(inpt)

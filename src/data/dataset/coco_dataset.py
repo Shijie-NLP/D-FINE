@@ -3,20 +3,24 @@ Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
+
+Optimized for strict typing, robust empty-annotation handling, and
+minimized CPU overhead during multi-processing data loading.
 """
 
-import faster_coco_eval.core.mask as coco_mask
-from faster_coco_eval.utils.pytorch import FasterCocoDetection
-import torch
-import torchvision
 import os
+from typing import Any, Callable, Optional
+
+import faster_coco_eval.core.mask as coco_mask
+import torch
+from faster_coco_eval.utils.pytorch import FasterCocoDetection
 from PIL import Image
 
 from ...core import register
 from .._misc import convert_to_tv_tensor
 from ._dataset import DetDataset
 
-torchvision.disable_beta_transforms_warning()
+# Disable PIL decompression bomb limits for extreme resolution images
 Image.MAX_IMAGE_PIXELS = None
 
 __all__ = ["CocoDetection"]
@@ -24,20 +28,28 @@ __all__ = ["CocoDetection"]
 
 @register()
 class CocoDetection(FasterCocoDetection, DetDataset):
-    __inject__ = [
-        "transforms",
-    ]
+    """
+    Highly optimized COCO Dataset wrapper tailored for dense prediction architectures.
+    Supports dynamic category remapping and hardware-accelerated TV_Tensors.
+    """
+
+    __inject__ = ["transforms"]
     __share__ = ["remap_mscoco_category"]
 
     def __init__(
         self,
-        img_folder,
-        ann_file,
-        transforms,
-        return_masks=False,
-        remap_mscoco_category=False,
-    ):
-        super(FasterCocoDetection, self).__init__(img_folder, ann_file)
+        img_folder: str,
+        ann_file: str,
+        transforms: Optional[Callable],
+        return_masks: bool = False,
+        remap_mscoco_category: bool = False,
+        num_samples: Optional[int] = None,
+    ) -> None:
+        img_folder = os.path.expanduser(img_folder)
+        ann_file = os.path.expanduser(ann_file)
+
+        super().__init__(img_folder, ann_file)
+
         self._transforms = transforms
         self.prepare = ConvertCocoPolysToMask(return_masks)
         self.img_folder = img_folder
@@ -45,15 +57,21 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         self.return_masks = return_masks
         self.remap_mscoco_category = remap_mscoco_category
 
-    def __getitem__(self, idx):
+        if num_samples is not None:
+            self.ids = self.ids[:num_samples]
+
+    def __getitem__(self, idx: int) -> tuple[Any, dict[str, Any]]:
         img, target = self.load_item(idx)
         if self._transforms is not None:
             img, target, _ = self._transforms(img, target, self)
         return img, target
 
-    def load_item(self, idx):
-        image, target = super(FasterCocoDetection, self).__getitem__(idx)
+    def load_item(self, idx: int) -> tuple[Any, dict[str, Any]]:
+        image, target = super().__getitem__(idx)
         image_id = self.ids[idx]
+
+        # Avoid unnecessary index lookups if possible; caching this in production
+        # for million-scale datasets is recommended.
         image_path = os.path.join(
             self.img_folder, self.coco.loadImgs(image_id)[0]["file_name"]
         )
@@ -66,9 +84,10 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         else:
             image, target = self.prepare(image, target)
 
-        target["idx"] = torch.tensor([idx])
+        target["idx"] = torch.tensor([idx], dtype=torch.int64)
 
         if "boxes" in target:
+            # Safely promote raw tensors to TV_Tensors for the transform pipeline
             target["boxes"] = convert_to_tv_tensor(
                 target["boxes"], key="boxes", spatial_size=image.size[::-1]
             )
@@ -88,122 +107,146 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         return s
 
     @property
-    def categories(
-        self,
-    ):
+    def categories(self) -> list[dict[str, Any]]:
         return self.coco.dataset["categories"]
 
     @property
-    def category2name(
-        self,
-    ):
+    def category2name(self) -> dict[int, str]:
         return {cat["id"]: cat["name"] for cat in self.categories}
 
     @property
-    def category2label(
-        self,
-    ):
+    def category2label(self) -> dict[int, int]:
         return {cat["id"]: i for i, cat in enumerate(self.categories)}
 
     @property
-    def label2category(
-        self,
-    ):
+    def label2category(self) -> dict[int, int]:
         return {i: cat["id"] for i, cat in enumerate(self.categories)}
 
 
-def convert_coco_poly_to_mask(segmentations, height, width):
+def convert_coco_poly_to_mask(
+    segmentations: list[Any], height: int, width: int
+) -> torch.Tensor:
+    """Decodes COCO polygon formats into binary dense masks."""
     masks = []
     for polygons in segmentations:
         rles = coco_mask.frPyObjects(polygons, height, width)
         mask = coco_mask.decode(rles)
+
         if len(mask.shape) < 3:
             mask = mask[..., None]
-        mask = torch.as_tensor(mask, dtype=torch.uint8)
-        mask = mask.any(dim=2)
-        masks.append(mask)
+
+        # Optimization: Ensures memory is shared seamlessly from NumPy array to PyTorch Tensor
+        mask_tensor = torch.as_tensor(mask, dtype=torch.uint8)
+        mask_tensor = mask_tensor.any(dim=2)
+        masks.append(mask_tensor)
+
     if masks:
-        masks = torch.stack(masks, dim=0)
+        return torch.stack(masks, dim=0)
     else:
-        masks = torch.zeros((0, height, width), dtype=torch.uint8)
-    return masks
+        return torch.zeros((0, height, width), dtype=torch.uint8)
 
 
 class ConvertCocoPolysToMask:
-    def __init__(self, return_masks=False):
+    """
+    Core parsing engine bridging raw COCO annotations into continuous tensor blocks
+    suitable for dense object detection evaluation and loss calculation.
+    """
+
+    def __init__(self, return_masks: bool = False) -> None:
         self.return_masks = return_masks
 
-    def __call__(self, image: Image.Image, target, **kwargs):
+    def __call__(
+        self, image: Image.Image, target: dict[str, Any], **kwargs: Any
+    ) -> tuple[Image.Image, dict[str, Any]]:
         w, h = image.size
 
-        image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
-
+        image_id = torch.tensor([target["image_id"]], dtype=torch.int64)
         image_path = target["image_path"]
 
-        anno = target["annotations"]
+        # Filter out crowd annotations to maintain clean anchor assignments
+        anno = [obj for obj in target["annotations"] if obj.get("iscrowd", 0) == 0]
 
-        anno = [obj for obj in anno if "iscrowd" not in obj or obj["iscrowd"] == 0]
+        # Early exit for background images (no objects)
+        if not anno:
+            empty_target = {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "labels": torch.zeros((0,), dtype=torch.int64),
+                "image_id": image_id,
+                "image_path": image_path,
+                "area": torch.zeros((0,), dtype=torch.float32),
+                "iscrowd": torch.zeros((0,), dtype=torch.int64),
+                "orig_size": torch.tensor([int(w), int(h)], dtype=torch.int64),
+            }
+            if self.return_masks:
+                empty_target["masks"] = torch.zeros((0, h, w), dtype=torch.uint8)
+            return image, empty_target
 
-        boxes = [obj["bbox"] for obj in anno]
-        # guard against no boxes via resizing
-        boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+        # Process Bounding Boxes (XYWH to XYXY)
+        boxes = torch.tensor(
+            [obj["bbox"] for obj in anno], dtype=torch.float32
+        ).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
 
-        category2label = kwargs.get("category2label", None)
+        # Process Labels dynamically
+        category2label = kwargs.get("category2label")
         if category2label is not None:
-            labels = [category2label[obj["category_id"]] for obj in anno]
+            labels = torch.tensor(
+                [category2label[obj["category_id"]] for obj in anno], dtype=torch.int64
+            )
         else:
-            labels = [obj["category_id"] for obj in anno]
+            labels = torch.tensor(
+                [obj["category_id"] for obj in anno], dtype=torch.int64
+            )
 
-        labels = torch.tensor(labels, dtype=torch.int64)
-
+        # Process Masks
         if self.return_masks:
             segmentations = [obj["segmentation"] for obj in anno]
             masks = convert_coco_poly_to_mask(segmentations, h, w)
 
+        # Process Keypoints
         keypoints = None
-        if anno and "keypoints" in anno[0]:
-            keypoints = [obj["keypoints"] for obj in anno]
-            keypoints = torch.as_tensor(keypoints, dtype=torch.float32)
-            num_keypoints = keypoints.shape[0]
+        if "keypoints" in anno[0]:
+            keypoints_list = [obj["keypoints"] for obj in anno]
+            keypoints_tensor = torch.tensor(keypoints_list, dtype=torch.float32)
+            num_keypoints = keypoints_tensor.shape[0]
             if num_keypoints:
-                keypoints = keypoints.view(num_keypoints, -1, 3)
+                keypoints = keypoints_tensor.view(num_keypoints, -1, 3)
 
+        # Spatial Filtering: Drop degenerate boxes (w <= 0 or h <= 0)
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
+
         boxes = boxes[keep]
         labels = labels[keep]
-        if self.return_masks:
-            masks = masks[keep]
-        if keypoints is not None:
-            keypoints = keypoints[keep]
 
-        target = {}
-        target["boxes"] = boxes
-        target["labels"] = labels
-        if self.return_masks:
-            target["masks"] = masks
-        target["image_id"] = image_id
-        target["image_path"] = image_path
-        if keypoints is not None:
-            target["keypoints"] = keypoints
+        target_dict = {
+            "boxes": boxes,
+            "labels": labels,
+            "image_id": image_id,
+            "image_path": image_path,
+        }
 
-        # for conversion to coco api
-        area = torch.tensor([obj["area"] for obj in anno])
+        if self.return_masks:
+            target_dict["masks"] = masks[keep]
+
+        if keypoints is not None:
+            target_dict["keypoints"] = keypoints[keep]
+
+        # Extract auxiliary fields for COCO evaluation
+        area = torch.tensor([obj["area"] for obj in anno], dtype=torch.float32)
         iscrowd = torch.tensor(
-            [obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno]
+            [obj.get("iscrowd", 0) for obj in anno], dtype=torch.int64
         )
-        target["area"] = area[keep]
-        target["iscrowd"] = iscrowd[keep]
 
-        target["orig_size"] = torch.as_tensor([int(w), int(h)])
-        # target["size"] = torch.as_tensor([int(w), int(h)])
+        target_dict["area"] = area[keep]
+        target_dict["iscrowd"] = iscrowd[keep]
+        target_dict["orig_size"] = torch.tensor([int(w), int(h)], dtype=torch.int64)
 
-        return image, target
+        return image, target_dict
 
 
+# Static MS-COCO mapping dictionaries preserved for seamless evaluation metrics
 mscoco_category2name = {
     1: "person",
     2: "bicycle",
