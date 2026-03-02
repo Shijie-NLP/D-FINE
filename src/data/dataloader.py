@@ -16,6 +16,7 @@ from torch import Tensor
 
 from ..core import register
 
+
 __all__ = [
     "DataLoader",
     "BaseCollateFunction",
@@ -99,9 +100,7 @@ def generate_scales(base_size: int, base_size_repeat: int) -> list[int]:
     scale-invariance during dense prediction tasks.
     """
     scale_repeat = (base_size - int(base_size * 0.75 / 32) * 32) // 32
-    scales: list[int] = [
-        int(base_size * 0.75 / 32) * 32 + i * 32 for i in range(scale_repeat)
-    ]
+    scales: list[int] = [int(base_size * 0.75 / 32) * 32 + i * 32 for i in range(scale_repeat)]
     scales += [base_size] * base_size_repeat
     scales += [int(base_size * 1.25 / 32) * 32 - i * 32 for i in range(scale_repeat)]
     return scales
@@ -124,17 +123,13 @@ class BatchImageCollateFunction(BaseCollateFunction):
         super().__init__()
         self.base_size = base_size
         self.scales: Optional[list[int]] = (
-            generate_scales(base_size, base_size_repeat)
-            if base_size_repeat is not None
-            else None
+            generate_scales(base_size, base_size_repeat) if base_size_repeat is not None else None
         )
         # Fallback to an arbitrarily large number if no stop epoch is provided
         self.stop_epoch = stop_epoch if stop_epoch is not None else 100_000_000
         self.ema_restart_decay = ema_restart_decay
 
-    def __call__(
-        self, items: list[tuple[Tensor, dict[str, Tensor]]]
-    ) -> tuple[Tensor, list[dict[str, Tensor]]]:
+    def __call__(self, items: list[tuple[Tensor, dict[str, Tensor]]]) -> tuple[Tensor, list[dict[str, Tensor]]]:
         # Optimization: C-level continuous memory stack
         images = torch.stack([x[0] for x in items], dim=0)
         targets = [x[1] for x in items]
@@ -150,12 +145,9 @@ class BatchImageCollateFunction(BaseCollateFunction):
             if "masks" in targets[0]:
                 # SAC Warning: 'nearest' mode will erase extremely small instance masks.
                 for tg in targets:
-                    tg["masks"] = F.interpolate(
-                        tg["masks"], size=(sz, sz), mode="nearest"
-                    )
+                    tg["masks"] = F.interpolate(tg["masks"], size=(sz, sz), mode="nearest")
                 raise NotImplementedError(
-                    "Mask interpolation via nearest-neighbor can degrade performance. "
-                    "Custom handling is required."
+                    "Mask interpolation via nearest-neighbor can degrade performance. Custom handling is required."
                 )
 
         return images, targets

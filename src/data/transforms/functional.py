@@ -30,9 +30,7 @@ def interpolate(
     )
 
 
-def crop(
-    image: Any, target: dict[str, Any], region: tuple[int, int, int, int]
-) -> tuple[Any, dict[str, Any]]:
+def crop(image: Any, target: dict[str, Any], region: tuple[int, int, int, int]) -> tuple[Any, dict[str, Any]]:
     """Crops the image and adjusts bounding boxes/masks safely."""
     cropped_image = F.crop(image, *region)
 
@@ -135,9 +133,7 @@ def resize(
 
         return oh, ow
 
-    def get_size(
-        image_size: tuple[int, int], size: Any, max_size: Optional[int] = None
-    ) -> tuple[int, int]:
+    def get_size(image_size: tuple[int, int], size: Any, max_size: Optional[int] = None) -> tuple[int, int]:
         if isinstance(size, (list, tuple)):
             return size[::-1]
         else:
@@ -149,9 +145,7 @@ def resize(
     if target is None:
         return rescaled_image, None
 
-    ratios = tuple(
-        float(s) / float(s_orig) for s, s_orig in zip(rescaled_image.size, image.size)
-    )
+    ratios = tuple(float(s) / float(s_orig) for s, s_orig in zip(rescaled_image.size, image.size))
     ratio_width, ratio_height = ratios
 
     target = target.copy()
@@ -180,10 +174,7 @@ def resize(
     if "masks" in target:
         # SAC Warning: "nearest" mode here will permanently delete masks of
         # objects smaller than the interpolation stride.
-        target["masks"] = (
-            interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0]
-            > 0.5
-        )
+        target["masks"] = interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0] > 0.5
 
     return rescaled_image, target
 
@@ -200,7 +191,5 @@ def pad(
     target["size"] = torch.tensor(padded_image.size[::-1])
 
     if "masks" in target:
-        target["masks"] = torch.nn.functional.pad(
-            target["masks"], (0, padding[0], 0, padding[1])
-        )
+        target["masks"] = torch.nn.functional.pad(target["masks"], (0, padding[0], 0, padding[1]))
     return padded_image, target

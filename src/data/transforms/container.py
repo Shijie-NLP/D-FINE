@@ -47,9 +47,7 @@ class Compose(T.Compose):
                     transforms.append(op)
 
                 else:
-                    raise ValueError(
-                        f"Unsupported operation type in Compose: {type(op)}"
-                    )
+                    raise ValueError(f"Unsupported operation type in Compose: {type(op)}")
         else:
             transforms = [EmptyTransform()]
 
@@ -112,10 +110,7 @@ class Compose(T.Compose):
 
         for transform in self.transforms:
             # Bypass specific transforms if the curriculum sample threshold is met
-            if (
-                type(transform).__name__ in policy_ops
-                and self.global_samples >= policy_sample
-            ):
+            if type(transform).__name__ in policy_ops and self.global_samples >= policy_sample:
                 continue
             sample = transform(sample)
 

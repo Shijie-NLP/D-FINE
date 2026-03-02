@@ -13,11 +13,11 @@ import torch
 import torchvision
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as F
+from torchvision.tv_tensors import Image, Video
 
 from ...core import register
 from .._misc import BoundingBoxes, Mask, _boxes_keys, convert_to_tv_tensor
 
-from torchvision.tv_tensors import Image, Video
 
 # Registering standard v2 transforms into the global workspace
 RandomPhotometricDistort = register()(T.RandomPhotometricDistort)
@@ -155,9 +155,7 @@ class ConvertBoxes(T.Transform):
 
         if self.fmt:
             in_fmt = inpt.format.value.lower()
-            inpt = torchvision.ops.box_convert(
-                inpt, in_fmt=in_fmt, out_fmt=self.fmt.lower()
-            )
+            inpt = torchvision.ops.box_convert(inpt, in_fmt=in_fmt, out_fmt=self.fmt.lower())
             inpt = convert_to_tv_tensor(
                 inpt,
                 key="boxes",
@@ -170,9 +168,7 @@ class ConvertBoxes(T.Transform):
             # with direct, device-aware tensor construction. This strictly prevents
             # precision drift and host-to-device bottlenecks for tiny object coordinates.
             h, w = spatial_size
-            scale_tensor = torch.tensor(
-                [w, h, w, h], dtype=inpt.dtype, device=inpt.device
-            )
+            scale_tensor = torch.tensor([w, h, w, h], dtype=inpt.dtype, device=inpt.device)
             inpt = inpt / scale_tensor
 
         return inpt

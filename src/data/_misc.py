@@ -60,9 +60,7 @@ def convert_to_tv_tensor(
     Returns:
         Tensor: A specialized TV_Tensor subclass (BoundingBoxes or Mask).
     """
-    assert key in ("boxes", "masks"), (
-        f"Unsupported key: '{key}'. Only 'boxes' and 'masks' are supported."
-    )
+    assert key in ("boxes", "masks"), f"Unsupported key: '{key}'. Only 'boxes' and 'masks' are supported."
 
     if key == "boxes":
         # Dynamically fetch the format enum safely

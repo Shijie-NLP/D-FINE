@@ -11,13 +11,12 @@ import inspect
 from collections import defaultdict
 from typing import Any, Callable, Optional, Union
 
+
 # Global registry for schemas and instantiated modules
 GLOBAL_CONFIG: dict[str, Any] = defaultdict(dict)
 
 
-def register(
-    dct: Any = GLOBAL_CONFIG, name: Optional[str] = None, force: bool = False
-) -> Callable:
+def register(dct: Any = GLOBAL_CONFIG, name: Optional[str] = None, force: bool = False) -> Callable:
     """
     Decorator to register a class or function into a configuration dictionary
     or as an attribute of a specific module/class.
@@ -34,13 +33,9 @@ def register(
         # Validation to prevent accidental overwrites
         if not force:
             if inspect.isclass(dct):
-                assert not hasattr(dct, foo.__name__), (
-                    f"Module {dct.__name__} already has attribute {foo.__name__}"
-                )
+                assert not hasattr(dct, foo.__name__), f"Module {dct.__name__} already has attribute {foo.__name__}"
             else:
-                assert foo.__name__ not in dct, (
-                    f"Target {foo.__name__} has already been registered."
-                )
+                assert foo.__name__ not in dct, f"Target {foo.__name__} has already been registered."
 
         if inspect.isfunction(foo):
 
@@ -90,9 +85,7 @@ def extract_schema(module: type) -> dict[str, Any]:
 
     for i, arg_name in enumerate(arg_names):
         if arg_name in schema["_share"]:
-            assert i >= num_requires, (
-                f"Shared config '{arg_name}' must have a default value."
-            )
+            assert i >= num_requires, f"Shared config '{arg_name}' must have a default value."
             value = argspec.defaults[i - num_requires]
 
         elif i >= num_requires:
@@ -116,9 +109,7 @@ def create(
     Dynamically instantiates a registered object by resolving its schema,
     injecting dependencies recursively, and binding shared configurations.
     """
-    assert isinstance(type_or_name, (type, str)), (
-        "Target must be a class type or a registered string name."
-    )
+    assert isinstance(type_or_name, (type, str)), "Target must be a class type or a registered string name."
 
     name = type_or_name if isinstance(type_or_name, str) else type_or_name.__name__
 
@@ -184,9 +175,7 @@ def create(
 
             _type = str(_k["type"])
             if _type not in global_cfg:
-                raise ValueError(
-                    f"Missing '{_type}' registered target in injection stage."
-                )
+                raise ValueError(f"Missing '{_type}' registered target in injection stage.")
 
             _cfg_nested: dict[str, Any] = global_cfg[_type]
 
@@ -198,9 +187,7 @@ def create(
 
             _cfg_nested.update(_cfg_nested.get("_kwargs", {}))  # Restore default values
             _cfg_nested.update(_k)  # Load config args
-            target_inject_name = _cfg_nested.pop(
-                "type"
-            )  # Pop extra key (`type` from _k)
+            target_inject_name = _cfg_nested.pop("type")  # Pop extra key (`type` from _k)
 
             module_kwargs[k] = create(target_inject_name, global_cfg)
 

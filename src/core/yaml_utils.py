@@ -14,6 +14,7 @@ import yaml
 
 from .workspace import GLOBAL_CONFIG
 
+
 __all__ = [
     "load_config",
     "merge_config",
@@ -61,18 +62,12 @@ def load_config(file_path: str, cfg: Optional[dict[str, Any]] = None) -> dict[st
     return merge_dict(cfg, file_cfg)
 
 
-def merge_dict(
-    dct: dict[str, Any], another_dct: dict[str, Any], inplace: bool = True
-) -> dict[str, Any]:
+def merge_dict(dct: dict[str, Any], another_dct: dict[str, Any], inplace: bool = True) -> dict[str, Any]:
     """Recursively merge `another_dct` into `dct`."""
 
     def _merge(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
         for k in source:
-            if (
-                k in target
-                and isinstance(target[k], dict)
-                and isinstance(source[k], dict)
-            ):
+            if k in target and isinstance(target[k], dict) and isinstance(source[k], dict):
                 _merge(target[k], source[k])
             else:
                 target[k] = source[k]

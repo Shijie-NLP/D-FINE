@@ -20,6 +20,7 @@ from ...core import register
 from .._misc import convert_to_tv_tensor
 from ._dataset import DetDataset
 
+
 # Disable PIL decompression bomb limits for extreme resolution images
 Image.MAX_IMAGE_PIXELS = None
 
@@ -72,15 +73,11 @@ class CocoDetection(FasterCocoDetection, DetDataset):
 
         # Avoid unnecessary index lookups if possible; caching this in production
         # for million-scale datasets is recommended.
-        image_path = os.path.join(
-            self.img_folder, self.coco.loadImgs(image_id)[0]["file_name"]
-        )
+        image_path = os.path.join(self.img_folder, self.coco.loadImgs(image_id)[0]["file_name"])
         target = {"image_id": image_id, "image_path": image_path, "annotations": target}
 
         if self.remap_mscoco_category:
-            image, target = self.prepare(
-                image, target, category2label=mscoco_category2label
-            )
+            image, target = self.prepare(image, target, category2label=mscoco_category2label)
         else:
             image, target = self.prepare(image, target)
 
@@ -88,9 +85,7 @@ class CocoDetection(FasterCocoDetection, DetDataset):
 
         if "boxes" in target:
             # Safely promote raw tensors to TV_Tensors for the transform pipeline
-            target["boxes"] = convert_to_tv_tensor(
-                target["boxes"], key="boxes", spatial_size=image.size[::-1]
-            )
+            target["boxes"] = convert_to_tv_tensor(target["boxes"], key="boxes", spatial_size=image.size[::-1])
 
         if "masks" in target:
             target["masks"] = convert_to_tv_tensor(target["masks"], key="masks")
@@ -123,9 +118,7 @@ class CocoDetection(FasterCocoDetection, DetDataset):
         return {i: cat["id"] for i, cat in enumerate(self.categories)}
 
 
-def convert_coco_poly_to_mask(
-    segmentations: list[Any], height: int, width: int
-) -> torch.Tensor:
+def convert_coco_poly_to_mask(segmentations: list[Any], height: int, width: int) -> torch.Tensor:
     """Decodes COCO polygon formats into binary dense masks."""
     masks = []
     for polygons in segmentations:
@@ -182,9 +175,7 @@ class ConvertCocoPolysToMask:
             return image, empty_target
 
         # Process Bounding Boxes (XYWH to XYXY)
-        boxes = torch.tensor(
-            [obj["bbox"] for obj in anno], dtype=torch.float32
-        ).reshape(-1, 4)
+        boxes = torch.tensor([obj["bbox"] for obj in anno], dtype=torch.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
@@ -192,13 +183,9 @@ class ConvertCocoPolysToMask:
         # Process Labels dynamically
         category2label = kwargs.get("category2label")
         if category2label is not None:
-            labels = torch.tensor(
-                [category2label[obj["category_id"]] for obj in anno], dtype=torch.int64
-            )
+            labels = torch.tensor([category2label[obj["category_id"]] for obj in anno], dtype=torch.int64)
         else:
-            labels = torch.tensor(
-                [obj["category_id"] for obj in anno], dtype=torch.int64
-            )
+            labels = torch.tensor([obj["category_id"] for obj in anno], dtype=torch.int64)
 
         # Process Masks
         if self.return_masks:
@@ -235,9 +222,7 @@ class ConvertCocoPolysToMask:
 
         # Extract auxiliary fields for COCO evaluation
         area = torch.tensor([obj["area"] for obj in anno], dtype=torch.float32)
-        iscrowd = torch.tensor(
-            [obj.get("iscrowd", 0) for obj in anno], dtype=torch.int64
-        )
+        iscrowd = torch.tensor([obj.get("iscrowd", 0) for obj in anno], dtype=torch.int64)
 
         target_dict["area"] = area[keep]
         target_dict["iscrowd"] = iscrowd[keep]

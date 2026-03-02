@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from ...core import register
 from .utils import get_activation
 
+
 __all__ = ["HybridEncoder"]
 
 
@@ -42,9 +43,7 @@ class ConvNormLayer_fuse(nn.Module):
     ):
         super().__init__()
         padding = (kernel_size - 1) // 2 if padding is None else padding
-        self.conv = nn.Conv2d(
-            ch_in, ch_out, kernel_size, stride, groups=g, padding=padding, bias=bias
-        )
+        self.conv = nn.Conv2d(ch_in, ch_out, kernel_size, stride, groups=g, padding=padding, bias=bias)
         self.norm = nn.BatchNorm2d(ch_out)
         self.act = nn.Identity() if act is None else get_activation(act)
 
@@ -115,9 +114,7 @@ class ConvNormLayer(nn.Module):
     ):
         super().__init__()
         padding = (kernel_size - 1) // 2 if padding is None else padding
-        self.conv = nn.Conv2d(
-            ch_in, ch_out, kernel_size, stride, groups=g, padding=padding, bias=bias
-        )
+        self.conv = nn.Conv2d(ch_in, ch_out, kernel_size, stride, groups=g, padding=padding, bias=bias)
         self.norm = nn.BatchNorm2d(ch_out)
         self.act = nn.Identity() if act is None else get_activation(act)
 
@@ -149,11 +146,7 @@ class VGGBlock(nn.Module):
 
         # Check against pure string to prevent instantiation errors
         # when act is already an nn.Identity or similar module.
-        self.act = (
-            nn.Identity()
-            if act is None
-            else (get_activation(act) if isinstance(act, str) else act)
-        )
+        self.act = nn.Identity() if act is None else (get_activation(act) if isinstance(act, str) else act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if hasattr(self, "conv"):
@@ -177,16 +170,12 @@ class VGGBlock(nn.Module):
         kernel1x1, bias1x1 = self._fuse_bn_tensor(self.conv2)
         return kernel3x3 + self._pad_1x1_to_3x3_tensor(kernel1x1), bias3x3 + bias1x1
 
-    def _pad_1x1_to_3x3_tensor(
-        self, kernel1x1: Union[torch.Tensor, int]
-    ) -> Union[torch.Tensor, int]:
+    def _pad_1x1_to_3x3_tensor(self, kernel1x1: Union[torch.Tensor, int]) -> Union[torch.Tensor, int]:
         if isinstance(kernel1x1, int) and kernel1x1 == 0:
             return 0
         return F.pad(kernel1x1, [1, 1, 1, 1])
 
-    def _fuse_bn_tensor(
-        self, branch: ConvNormLayer
-    ) -> tuple[Union[torch.Tensor, int], Union[torch.Tensor, int]]:
+    def _fuse_bn_tensor(self, branch: ConvNormLayer) -> tuple[Union[torch.Tensor, int], Union[torch.Tensor, int]]:
         if branch is None:
             return 0, 0
         kernel = branch.conv.weight
@@ -285,22 +274,13 @@ class CSPLayer(nn.Module):
     ):
         super().__init__()
         hidden_channels = int(out_channels * expansion)
-        self.conv1 = ConvNormLayer_fuse(
-            in_channels, hidden_channels, 1, 1, bias=bias, act=act
-        )
-        self.conv2 = ConvNormLayer_fuse(
-            in_channels, hidden_channels, 1, 1, bias=bias, act=act
-        )
+        self.conv1 = ConvNormLayer_fuse(in_channels, hidden_channels, 1, 1, bias=bias, act=act)
+        self.conv2 = ConvNormLayer_fuse(in_channels, hidden_channels, 1, 1, bias=bias, act=act)
         self.bottlenecks = nn.Sequential(
-            *[
-                bottletype(hidden_channels, hidden_channels, act=get_activation(act))
-                for _ in range(num_blocks)
-            ]
+            *[bottletype(hidden_channels, hidden_channels, act=get_activation(act)) for _ in range(num_blocks)]
         )
         if hidden_channels != out_channels:
-            self.conv3 = ConvNormLayer_fuse(
-                hidden_channels, out_channels, 1, 1, bias=bias, act=act
-            )
+            self.conv3 = ConvNormLayer_fuse(hidden_channels, out_channels, 1, 1, bias=bias, act=act)
         else:
             self.conv3 = nn.Identity()
 
@@ -326,9 +306,7 @@ class TransformerEncoderLayer(nn.Module):
         super().__init__()
         self.normalize_before = normalize_before
 
-        self.self_attn = nn.MultiheadAttention(
-            d_model, nhead, dropout, batch_first=True
-        )
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout, batch_first=True)
 
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
@@ -341,9 +319,7 @@ class TransformerEncoderLayer(nn.Module):
         self.activation = get_activation(activation)
 
     @staticmethod
-    def with_pos_embed(
-        tensor: torch.Tensor, pos_embed: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def with_pos_embed(tensor: torch.Tensor, pos_embed: Optional[torch.Tensor]) -> torch.Tensor:
         return tensor if pos_embed is None else tensor + pos_embed
 
     def forward(
@@ -386,9 +362,7 @@ class TransformerEncoder(nn.Module):
         norm: Optional[nn.Module] = None,
     ):
         super().__init__()
-        self.layers = nn.ModuleList(
-            [copy.deepcopy(encoder_layer) for _ in range(num_layers)]
-        )
+        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_layers)])
         self.num_layers = num_layers
         self.norm = norm
 
@@ -465,10 +439,7 @@ class HybridEncoder(nn.Module):
         )
 
         self.encoder = nn.ModuleList(
-            [
-                TransformerEncoder(copy.deepcopy(encoder_layer), num_encoder_layers)
-                for _ in range(len(use_encoder_idx))
-            ]
+            [TransformerEncoder(copy.deepcopy(encoder_layer), num_encoder_layers) for _ in range(len(use_encoder_idx))]
         )
 
         # Top-down FPN (Feature Pyramid Network)
@@ -536,9 +507,7 @@ class HybridEncoder(nn.Module):
         grid_h = torch.arange(int(h), dtype=torch.float32, device=device)
         grid_w, grid_h = torch.meshgrid(grid_w, grid_h, indexing="ij")
 
-        assert embed_dim % 4 == 0, (
-            "Embed dimension must be divisible by 4 for 2D sin-cos position embedding"
-        )
+        assert embed_dim % 4 == 0, "Embed dimension must be divisible by 4 for 2D sin-cos position embedding"
 
         pos_dim = embed_dim // 4
 
@@ -549,14 +518,10 @@ class HybridEncoder(nn.Module):
         out_w = grid_w.flatten()[..., None] * omega[None, :]
         out_h = grid_h.flatten()[..., None] * omega[None, :]
 
-        return torch.cat(
-            [out_w.sin(), out_w.cos(), out_h.sin(), out_h.cos()], dim=1
-        ).unsqueeze(0)
+        return torch.cat([out_w.sin(), out_w.cos(), out_h.sin(), out_h.cos()], dim=1).unsqueeze(0)
 
     def forward(self, feats: list[torch.Tensor]) -> list[torch.Tensor]:
-        assert len(feats) == len(self.in_channels), (
-            "Number of input features must match in_channels"
-        )
+        assert len(feats) == len(self.in_channels), "Number of input features must match in_channels"
         proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
 
         # Internal Transformer Encoder augmentation
@@ -576,16 +541,10 @@ class HybridEncoder(nn.Module):
                         device=src_flatten.device,
                     )
                 else:
-                    pos_embed = getattr(self, f"pos_embed{enc_ind}", None).to(
-                        src_flatten.device
-                    )
+                    pos_embed = getattr(self, f"pos_embed{enc_ind}", None).to(src_flatten.device)
 
                 memory: torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
-                proj_feats[enc_ind] = (
-                    memory.permute(0, 2, 1)
-                    .reshape(-1, self.hidden_dim, h, w)
-                    .contiguous()
-                )
+                proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()
 
         # Broadcasting and Fusion (Top-Down FPN)
         inner_outs = [proj_feats[-1]]
@@ -600,9 +559,7 @@ class HybridEncoder(nn.Module):
             upsample_feat = F.interpolate(feat_heigh, scale_factor=2.0, mode="nearest")
 
             # Optimization: Use torch.cat over torch.concat
-            inner_out = self.fpn_blocks[len(self.in_channels) - 1 - idx](
-                torch.cat([upsample_feat, feat_low], dim=1)
-            )
+            inner_out = self.fpn_blocks[len(self.in_channels) - 1 - idx](torch.cat([upsample_feat, feat_low], dim=1))
             inner_outs.insert(0, inner_out)
 
         # Bottom-Up PAN

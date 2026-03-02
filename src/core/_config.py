@@ -6,7 +6,7 @@ Optimized for strict typing, memory safety, and framework compatibility.
 """
 
 from pathlib import Path
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -15,6 +15,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
+
 
 __all__ = ["BaseConfig"]
 
@@ -82,8 +83,7 @@ class BaseConfig:
     def _validate_type(self, obj: Any, expected_type: type) -> None:
         """Internal helper to validate setter types efficiently."""
         assert isinstance(obj, expected_type), (
-            f"Expected {expected_type.__name__}, but got {type(obj).__name__}. "
-            f"Please check your instantiation logic."
+            f"Expected {expected_type.__name__}, but got {type(obj).__name__}. Please check your instantiation logic."
         )
 
     # =========================================================================
@@ -328,6 +328,4 @@ class BaseConfig:
         Optimized string representation using generator expression and string
         joining for O(N) memory allocation efficiency.
         """
-        return "".join(
-            f"{k}: {v}\n" for k, v in self.__dict__.items() if not k.startswith("_")
-        )
+        return "".join(f"{k}: {v}\n" for k, v in self.__dict__.items() if not k.startswith("_"))
