@@ -112,7 +112,7 @@ class YAMLConfig(BaseConfig):
             eval_type = self.yaml_cfg["evaluator"].get("type", "")
             if eval_type == "CocoEvaluator":
                 # Lazy import to prevent data handling circular dependencies
-                from ..data import get_coco_api_from_dataset
+                from ..data.dataset.coco_utils import get_coco_api_from_dataset
 
                 base_ds = get_coco_api_from_dataset(self.val_dataloader.dataset)
                 self._evaluator = create("evaluator", self.global_cfg, coco_gt=base_ds)

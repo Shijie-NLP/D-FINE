@@ -16,7 +16,8 @@ from typing import Any
 
 import torch
 
-from ..misc import dist_utils, stats
+from ..misc import dist_utils
+from ..misc.profiler_utils import stats
 from ._solver import BaseSolver
 from .det_engine import evaluate, train_one_epoch
 

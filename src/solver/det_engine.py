@@ -24,7 +24,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ..data.dataset import mscoco_category2label
 from ..data.dataset.coco_eval import CocoEvaluator
-from ..misc import MetricLogger, SmoothedValue, dist_utils, save_samples
+from ..misc import dist_utils
+from ..misc.logger import MetricLogger, SmoothedValue
+from ..misc.visualizer import save_samples
 from ..optim import ModelEMA, Warmup
 from .validator import Validator, scale_boxes
 
