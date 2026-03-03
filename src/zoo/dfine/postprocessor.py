@@ -68,22 +68,26 @@ class DFINEPostProcessor(nn.Module):
     def forward(self, outputs: dict[str, torch.Tensor], orig_target_sizes: torch.Tensor):
         logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
 
-        bbox_pred = torchvision.ops.box_convert(boxes, in_fmt="cxcywh", out_fmt="xyxy")
-
-        # In-place multiplication for memory efficiency
+        # 1. Base scaling tensor creation
         scale_tensor = orig_target_sizes.repeat(1, 2).unsqueeze(1)
-        bbox_pred.mul_(scale_tensor)
+
+        # Helper function to decode and scale boxes efficiently in-place
+        def _decode_and_scale(b: torch.Tensor) -> torch.Tensor:
+            b_xyxy = torchvision.ops.box_convert(b, in_fmt="cxcywh", out_fmt="xyxy")
+            b_xyxy.mul_(scale_tensor)
+            return b_xyxy
+
+        # 2. Process final predictions
+        bbox_pred = _decode_and_scale(boxes)
 
         if self.use_focal_loss:
             scores = logits.sigmoid()
             scores, index = torch.topk(scores.flatten(1), self.num_top_queries, dim=-1)
 
-            # Modern ONNX/TRT natively supports modulo and integer division.
             labels = index % self.num_classes
             index = torch.div(index, self.num_classes, rounding_mode="floor")
 
-            # Use expand instead of repeat to achieve zero-memory-allocation broadcasting
-            boxes = bbox_pred.gather(dim=1, index=index.unsqueeze(-1).expand(-1, -1, bbox_pred.shape[-1]))
+            final_boxes = bbox_pred.gather(dim=1, index=index.unsqueeze(-1).expand(-1, -1, bbox_pred.shape[-1]))
 
         else:
             scores = logits.softmax(dim=-1)[..., :-1]
@@ -93,19 +97,55 @@ class DFINEPostProcessor(nn.Module):
                 scores, index = torch.topk(scores, self.num_top_queries, dim=-1)
                 labels = torch.gather(labels, dim=1, index=index)
 
-                # Use expand instead of tile
-                boxes = torch.gather(bbox_pred, dim=1, index=index.unsqueeze(-1).expand(-1, -1, bbox_pred.shape[-1]))
+                final_boxes = torch.gather(
+                    bbox_pred, dim=1, index=index.unsqueeze(-1).expand(-1, -1, bbox_pred.shape[-1])
+                )
+            else:
+                final_boxes = bbox_pred
 
         if self.deploy_mode:
-            return labels, boxes, scores
+            return labels, final_boxes, scores
 
         if self.remap_mscoco_category:
-            # Vectorized O(1) mapping entirely on GPU, completely eliminating D2H syncs
             labels = self.mscoco_mapping[labels]
 
+        # 3. Process intermediate trajectory boxes for visualization
+        enc_aux_boxes = None
+        if "enc_aux_outputs" in outputs:
+            # Resulting shape: [num_layers, batch_size, num_queries, 4]
+            enc_aux_boxes = torch.stack(
+                [_decode_and_scale(aux["pred_boxes"]) for aux in outputs["enc_aux_outputs"]], dim=0
+            )
+            enc_aux_scores = torch.stack([aux["pred_logits"].sigmoid() for aux in outputs["enc_aux_outputs"]], dim=0)
+
+        pre_boxes = None
+        if "pre_outputs" in outputs and "pred_boxes" in outputs["pre_outputs"]:
+            # Resulting shape: [batch_size, num_queries, 4]
+            pre_boxes = _decode_and_scale(outputs["pre_outputs"]["pred_boxes"])
+            pre_scores = outputs["pre_outputs"]["pred_logits"].sigmoid()
+
+        aux_boxes = None
+        if "aux_outputs" in outputs:
+            aux_boxes = torch.stack([_decode_and_scale(aux["pred_boxes"]) for aux in outputs["aux_outputs"]], dim=0)
+            aux_scores = torch.stack([aux["pred_logits"].sigmoid() for aux in outputs["aux_outputs"]], dim=0)
+
+        # 4. Pack everything into the batch-wise results dictionary
         results = []
-        for lab, box, sco in zip(labels, boxes, scores):
-            results.append(dict(labels=lab, boxes=box, scores=sco))
+        for i in range(len(labels)):
+            res_dict = {"labels": labels[i], "boxes": final_boxes[i], "scores": scores[i]}
+
+            # Inject auxiliary trajectory data aligned by batch index
+            if enc_aux_boxes is not None:
+                res_dict["enc_aux_boxes"] = enc_aux_boxes[:, i, :, :]  # [num_layers, num_queries, 4]
+                res_dict["enc_aux_scores"] = enc_aux_scores[:, i, :]
+            if pre_boxes is not None:
+                res_dict["pre_boxes"] = pre_boxes[i]  # [num_queries, 4]
+                res_dict["pre_scores"] = pre_scores[i]
+            if aux_boxes is not None:
+                res_dict["aux_boxes"] = aux_boxes[:, i, :, :]
+                res_dict["aux_scores"] = aux_scores[:, i, :]
+
+            results.append(res_dict)
 
         return results
 
