@@ -5,23 +5,27 @@ Optimized for Layer-wise Ablation and Robust FiftyOne Visualization.
 
 import argparse
 import os
-import subprocess
 import sys
+
+
+os.environ["FIFTYONE_DATASET_ZOO_DIR"] = os.path.expanduser("~/Data/datasets/fiftyone")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
+import subprocess
 import time
 
 import fiftyone as fo
 import fiftyone.core.labels as fol
 import fiftyone.core.models as fom
 import fiftyone.zoo as foz
+import numpy as np
 import torch
 import torchvision.transforms as transforms
-from fiftyone import ViewField as F
+from fiftyone.types import FiftyOneDataset
 from PIL import Image
+from tqdm import tqdm
 
 from src.core import YAMLConfig
-
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 
 
 def kill_existing_mongod():
@@ -84,103 +88,131 @@ class DFineEvaluator(fom.Model):
 
         # SAC NOTE: Direct resize alters aspect ratios.
         # For rigorous benchmark evaluation, consider implementing LetterBox padding here.
-        self.transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Resize((640, 640)),
-            ]
-        )
+        self.transform = transforms.Compose([transforms.ToTensor(), transforms.Resize((640, 640))])
 
     @property
     def media_type(self):
         return "image"
 
     @property
-    def has_logits(self):
+    def ragged_batches(self):
         return False
 
-    @property
-    def has_embeddings(self):
-        return False
+    @staticmethod
+    def _convert_dense_predictions(bboxes, scores, img_w, img_h, labels=None):
+        num_queries, num_classes = scores.shape
+        k = min(3, num_classes)
 
-    def _convert_predictions(self, predictions, img_w=640, img_h=640):
-        """
-        Convert raw model outputs to FiftyOne Detection objects.
-        Bounding boxes must be normalized to [0, 1] for FiftyOne UI.
-        """
-        class_labels = predictions["labels"]
-        bboxes = predictions["boxes"]
-        scores = predictions["scores"]
+        bboxes_w = bboxes[:, 2] - bboxes[:, 0]
+        bboxes_h = bboxes[:, 3] - bboxes[:, 1]
+
+        fo_bboxes = torch.stack(
+            [bboxes[:, 0] / img_w, bboxes[:, 1] / img_h, bboxes_w / img_w, bboxes_h / img_h], dim=-1
+        )  # shape: [num_queries, 4]
+
+        if num_classes == 1:
+            assert labels is not None
+            topk_scores = scores  # [num_queries, 1]
+            if torch.is_tensor(labels):
+                # 确保维度是对齐的 [num_queries, 1]
+                topk_labels = labels.unsqueeze(1) if labels.dim() == 1 else labels
+            else:
+                topk_labels = torch.tensor(labels, device=scores.device).unsqueeze(1)
+        else:
+            # 利用底层 C++/CUDA 完成 Top-K 提取
+            topk_scores, topk_indices = torch.topk(scores, k, dim=-1)
+            topk_labels = topk_indices + 1  # 加上 COCO 偏移量
+
+        topk_scores_np = topk_scores.cpu().numpy()
+        topk_labels_np = topk_labels.cpu().numpy()
+        fo_bboxes_np = fo_bboxes.cpu().numpy()
+
+        mask = topk_scores_np >= 1e-4
+        valid_q_indices, valid_k_indices = np.where(mask)
 
         detections = []
-        for label, bbox, score in zip(class_labels, bboxes, scores):
-            # Convert [x_min, y_min, x_max, y_max] to FiftyOne format [x_min, y_min, width, height]
-            fo_bbox = [
-                bbox[0].item() / img_w,
-                bbox[1].item() / img_h,
-                (bbox[2].item() - bbox[0].item()) / img_w,
-                (bbox[3].item() - bbox[1].item()) / img_h,
-            ]
+
+        for q_idx, k_idx in zip(valid_q_indices, valid_k_indices):
+            score = topk_scores_np[q_idx, k_idx]
+            label_id = int(topk_labels_np[q_idx, k_idx])
+
+            # fo_bboxes_np[q_idx] 是一个 shape 为 (4,) 的 numpy 数组，直接转 list
+            bbox = fo_bboxes_np[q_idx].tolist()
 
             detection = fol.Detection(
-                label=LABEL_MAP.get(label.item(), "unknown"),
-                bounding_box=fo_bbox,
-                confidence=score.item(),
+                label=LABEL_MAP.get(label_id, "unknown"),
+                bounding_box=bbox,
+                confidence=float(score),
+                query_id=str(q_idx),
             )
             detections.append(detection)
 
         return fol.Detections(detections=detections)
 
-    def predict(self, image):
-        """Single image inference."""
-        image = Image.fromarray(image).convert("RGB")
-        image_tensor = self.transform(image).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            outputs = self.model(image_tensor)
-            # Assuming the postprocessor expects the target size
-            orig_target_sizes = torch.tensor([[640, 640]], device=self.device)
-            predictions = self.postprocessor(outputs, orig_target_sizes)
-
-        return self._convert_predictions(predictions[0])
-
     def predict_all(self, images):
-        """Batch image inference for accelerated FiftyOne processing."""
+        """Batch inference for high-throughput visualization."""
+        batch_size = len(images)
         image_tensors = []
+        orig_sizes = []
+
         for img in images:
+            # 动态提取每张图的原始尺寸，严格以 [W, H] 记录供 Postprocessor 使用
+            h, w = img.shape[:2]
+            orig_sizes.append([w, h])
+
             pil_img = Image.fromarray(img).convert("RGB")
             image_tensors.append(self.transform(pil_img))
 
         batch_tensor = torch.stack(image_tensors).to(self.device)
+        orig_target_sizes = torch.tensor(orig_sizes, device=self.device)
 
         with torch.no_grad():
             outputs = self.model(batch_tensor)
-            orig_target_sizes = torch.tensor([[640, 640] for _ in images], device=self.device)
+            # predictions 是一个 List[Dict]，长度为 batch_size
             predictions = self.postprocessor(outputs, orig_target_sizes)
 
-        return [self._convert_predictions(pred) for pred in predictions]
+        # 遍历 Batch 中的每一张图片，重构多层字典
+        batch_results = []
+        for b_idx in tqdm(range(batch_size)):
+            layer_predictions = {}
+            pred_b = predictions[b_idx]
+            orig_w, orig_h = orig_sizes[b_idx]
 
+            # 1. 提取该图片的最终层
+            layer_predictions["predictions_final"] = self._convert_dense_predictions(
+                pred_b["boxes"],
+                pred_b["scores"].unsqueeze(-1),
+                orig_w,
+                orig_h,
+                labels=pred_b["labels"],
+            )
 
-# ==============================================================================
-# Analytical Tools (Ready for activation when specific hypothesis testing is needed)
-# ==============================================================================
+            if "enc_aux_boxes" in pred_b and "enc_aux_scores" in pred_b:
+                layer_predictions["predictions_enc"] = self._convert_dense_predictions(
+                    pred_b["enc_aux_boxes"][0], pred_b["enc_aux_scores"][0], orig_w, orig_h
+                )
 
+            if "pre_boxes" in pred_b and "pre_scores" in pred_b:
+                layer_predictions["predictions_pre"] = self._convert_dense_predictions(
+                    pred_b["pre_boxes"], pred_b["pre_scores"], orig_w, orig_h
+                )
 
-def fast_iou(bbox1, bbox2):
-    """Calculates generic Intersection over Union for two bounding boxes."""
-    x1, y1, w1, h1 = bbox1
-    x2, y2, w2, h2 = bbox2
+            if "aux_boxes" in pred_b and "aux_scores" in pred_b:
+                aux_boxes = pred_b["aux_boxes"]  # [num_layers, num_queries, 4]
+                aux_scores = pred_b["aux_scores"]  # [num_layers, num_queries, num_classes]
+                num_layers = aux_boxes.shape[0]
 
-    xA = max(x1, x2)
-    yA = max(y1, y2)
-    xB = min(x1 + w1, x2 + w2)
-    yB = min(y1 + h1, y2 + h2)
+                for layer_idx in range(num_layers):
+                    l_boxes = aux_boxes[layer_idx]
+                    l_scores = aux_scores[layer_idx]
 
-    interArea = max(0, xB - xA) * max(0, yB - yA)
-    boxAArea = w1 * h1
-    boxBArea = w2 * h2
+                    layer_predictions[f"predictions_layer_{layer_idx}"] = self._convert_dense_predictions(
+                        l_boxes, l_scores, orig_w, orig_h
+                    )
 
-    return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+            batch_results.append(layer_predictions)
+
+        return batch_results
 
 
 def main(args):
@@ -188,27 +220,26 @@ def main(args):
         # Check if pre-computed views exist to save redundant inference time
         if os.path.exists("saved_predictions_view"):
             print("[Status] Loading cached predictions view from disk...")
-            dataset = foz.load_zoo_dataset(
-                "coco-2017",
-                split="validation",
-                dataset_name="evaluate-detections-tutorial",
-                dataset_dir="data/fiftyone",
-            )
+            dataset = foz.load_zoo_dataset("coco-2017", split="validation", dataset_name="D-FINE")  # noqa
             dataset.persistent = True
             predictions_view = fo.Dataset.from_dir(
-                dataset_dir="saved_predictions_view", dataset_type=fo.types.FiftyOneDataset
+                dataset_dir="saved_predictions_view",
+                dataset_type=FiftyOneDataset,  # noqa
             ).view()
-            session = fo.launch_app(predictions_view)
+            session = fo.launch_app(view=predictions_view, port=5151)
+
+            session.wait()
 
         else:
             print("[Status] Initializing D-FINE Model and FiftyOne Dataset...")
             dataset = foz.load_zoo_dataset(
                 "coco-2017",
                 split="validation",
-                dataset_name="evaluate-detections-tutorial",
-                dataset_dir="data/fiftyone",
+                dataset_name="D-FINE",  # noqa
+                dataset_dir="saved_predictions_view",
             )
             dataset.persistent = True
+            predictions_view = dataset.take(20, seed=51)
 
             # Load Model Configuration & Weights
             cfg = YAMLConfig(args.config, resume=args.resume)
@@ -224,40 +255,18 @@ def main(args):
             cfg.model.load_state_dict(state)
 
             # Subset for rapid debugging (adjust limit as necessary for full validation)
-            predictions_view = dataset.take(100, seed=51)
+
             model = DFineEvaluator(cfg)
 
-            # Determine which decoder layers to evaluate
-            # SAC Suggestion: Evaluate layer 0 (initial guesses) vs layer L (final output)
-            # to observe the refinement trajectory.
-            L = model.model.decoder.decoder.eval_idx
-            eval_layers = [L]  # e.g., expand to [0, L] for inter-layer ablation
-
-            for layer_idx in eval_layers:
-                print(f"[Inference] Processing Decoder Layer: {layer_idx}")
-                model.model.decoder.decoder.eval_idx = layer_idx
-                label_field = f"predictions{layer_idx}"
-                predictions_view.apply_model(model, label_field=label_field)
-
-                # Filter low-confidence predictions before evaluation
-                predictions_view = predictions_view.filter_labels(
-                    label_field, F("confidence") > 0.5, only_matches=False
-                )
-
-                # Compute rigorous COCO metrics
-                eval_key = f"eval{layer_idx}"
-                print(f"[Evaluation] Computing mAP for Layer: {layer_idx}")
-                _ = predictions_view.evaluate_detections(
-                    label_field,
-                    gt_field="ground_truth",
-                    eval_key=eval_key,
-                    compute_mAP=True,
-                )
+            print("[Inference] Executing single-pass multi-layer inference...")
+            predictions_view.apply_model(model, batch_size=32, progress=True)
 
             # Persist the view for future fast-loading
             predictions_view.export(export_dir="saved_predictions_view", dataset_type=fo.types.FiftyOneDataset)
 
-            session = fo.launch_app(predictions_view)
+            session = fo.launch_app(view=predictions_view, port=5151)
+
+            session.wait()
 
         print("[Status] Session is live. Press Ctrl+C to exit.")
         while True:
