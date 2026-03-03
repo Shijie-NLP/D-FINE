@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
+from torch import Tensor
 
 from ...core import register
 from .denoising import get_contrastive_denoising_training_group
@@ -50,7 +51,7 @@ class MLP(nn.Module):
         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
         self.act = get_activation(act)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         for i, layer in enumerate(self.layers):
             x = self.act(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
@@ -122,14 +123,14 @@ class MSDeformableAttention(nn.Module):
 
     def forward(
         self,
-        query: torch.Tensor,
-        reference_points: torch.Tensor,
-        value: torch.Tensor,
+        query: Tensor,
+        reference_points: Tensor,
+        value: Tensor,
         value_spatial_shapes: list[tuple[int, int]],
-    ) -> torch.Tensor:
+    ) -> Tensor:
         bs, Len_q = query.shape[:2]
 
-        sampling_offsets: torch.Tensor = self.sampling_offsets(query)
+        sampling_offsets: Tensor = self.sampling_offsets(query)
         sampling_offsets = sampling_offsets.reshape(bs, Len_q, self.num_heads, sum(self.num_points_list), 2)
 
         attention_weights = self.attention_weights(query).reshape(bs, Len_q, self.num_heads, sum(self.num_points_list))
@@ -204,10 +205,10 @@ class TransformerDecoderLayer(nn.Module):
         init.xavier_uniform_(self.linear1.weight)
         init.xavier_uniform_(self.linear2.weight)
 
-    def with_pos_embed(self, tensor: torch.Tensor, pos: Optional[torch.Tensor]) -> torch.Tensor:
+    def with_pos_embed(self, tensor: Tensor, pos: Optional[Tensor]) -> Tensor:
         return tensor if pos is None else tensor + pos
 
-    def forward_ffn(self, tgt: torch.Tensor) -> torch.Tensor:
+    def forward_ffn(self, tgt: Tensor) -> Tensor:
         return self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
 
     def forward(
@@ -739,11 +740,10 @@ class DFINETransformer(nn.Module):
         )
 
         enc_topk_bbox_unact: torch.Tensor = self.enc_bbox_head(enc_topk_memory) + enc_topk_anchors
-
-        if self.training:
-            enc_topk_bboxes = torch.sigmoid(enc_topk_bbox_unact)
-            enc_topk_bboxes_list.append(enc_topk_bboxes)
-            enc_topk_logits_list.append(enc_topk_logits)
+        # TODO: change back to training only
+        enc_topk_bboxes = torch.sigmoid(enc_topk_bbox_unact)
+        enc_topk_bboxes_list.append(enc_topk_bboxes)
+        enc_topk_logits_list.append(enc_topk_logits)
 
         if self.learn_query_content:
             content = self.tgt_embed.weight.unsqueeze(0).tile([memory.shape[0], 1, 1])
@@ -851,23 +851,26 @@ class DFINETransformer(nn.Module):
             dn_out_corners, out_corners = torch.split(out_corners, dn_meta["dn_num_split"], dim=2)
             dn_out_refs, out_refs = torch.split(out_refs, dn_meta["dn_num_split"], dim=2)
 
-        if self.training:
-            out = {
-                "pred_logits": out_logits[-1],
-                "pred_boxes": out_bboxes[-1],
-                "pred_corners": out_corners[-1],
-                "ref_points": out_refs[-1],
-                "up": self.up,
-                "reg_scale": self.reg_scale,
-            }
-        else:
-            out = {
-                "pred_logits": out_logits[-1],
-                "pred_boxes": out_bboxes[-1],
-                "init_boxes": torch.sigmoid(init_ref_points_unact),
-            }
+        out: dict[str, Any] = {
+            "pred_logits": out_logits[-1],
+            "pred_boxes": out_bboxes[-1],
+            "enc_aux_outputs": self._set_aux_loss(enc_topk_logits_list, enc_topk_bboxes_list),
+        }
 
-        if self.training and self.aux_loss:
+        if self.training:
+            out.update(
+                {
+                    "pred_corners": out_corners[-1],
+                    "ref_points": out_refs[-1],
+                    "up": self.up,
+                    "reg_scale": self.reg_scale,
+                }
+            )
+
+        if self.aux_loss and out_logits.shape[0] > 1:
+            out["pre_outputs"] = {"pred_logits": pre_logits, "pred_boxes": pre_bboxes}
+            out["enc_meta"] = {"class_agnostic": self.query_select_method == "agnostic"}
+
             out["aux_outputs"] = self._set_aux_loss2(
                 out_logits[:-1],
                 out_bboxes[:-1],
@@ -876,9 +879,6 @@ class DFINETransformer(nn.Module):
                 out_corners[-1],
                 out_logits[-1],
             )
-            out["enc_aux_outputs"] = self._set_aux_loss(enc_topk_logits_list, enc_topk_bboxes_list)
-            out["pre_outputs"] = {"pred_logits": pre_logits, "pred_boxes": pre_bboxes}
-            out["enc_meta"] = {"class_agnostic": self.query_select_method == "agnostic"}
 
             if dn_meta is not None:
                 out["dn_outputs"] = self._set_aux_loss2(
@@ -889,30 +889,25 @@ class DFINETransformer(nn.Module):
                     dn_out_corners[-1],
                     dn_out_logits[-1],
                 )
-                out["dn_pre_outputs"] = {
-                    "pred_logits": dn_pre_logits,
-                    "pred_boxes": dn_pre_bboxes,
-                }
+                out["dn_pre_outputs"] = {"pred_logits": dn_pre_logits, "pred_boxes": dn_pre_bboxes}
                 out["dn_meta"] = dn_meta
 
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(
-        self, outputs_class: list[torch.Tensor], outputs_coord: list[torch.Tensor]
-    ) -> list[dict[str, torch.Tensor]]:
+    def _set_aux_loss(self, outputs_class: list[Tensor], outputs_coord: list[Tensor]) -> list[dict[str, Tensor]]:
         return [{"pred_logits": a, "pred_boxes": b} for a, b in zip(outputs_class, outputs_coord)]
 
     @torch.jit.unused
     def _set_aux_loss2(
         self,
-        outputs_class: list[torch.Tensor],
-        outputs_coord: list[torch.Tensor],
-        outputs_corners: list[torch.Tensor],
-        outputs_ref: list[torch.Tensor],
-        teacher_corners: Optional[torch.Tensor] = None,
-        teacher_logits: Optional[torch.Tensor] = None,
-    ) -> list[dict[str, Optional[torch.Tensor]]]:
+        outputs_class: list[Tensor],
+        outputs_coord: list[Tensor],
+        outputs_corners: list[Tensor],
+        outputs_ref: list[Tensor],
+        teacher_corners: Optional[Tensor] = None,
+        teacher_logits: Optional[Tensor] = None,
+    ) -> list[dict[str, Optional[Tensor]]]:
         return [
             {
                 "pred_logits": a,
