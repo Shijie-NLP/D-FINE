@@ -318,7 +318,7 @@ class TransformerDecoder(nn.Module):
         reg_max: int,
         reg_scale: nn.Parameter,
         up: nn.Parameter,
-        eval_idx: int = -1,
+        eval_idx: Union[int, list[int]] = -1,
         layer_scale: float = 2.0,
     ):
         super().__init__()
@@ -326,12 +326,19 @@ class TransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.layer_scale = layer_scale
         self.num_head = num_head
-        self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+
+        eval_idx = [eval_idx] if isinstance(eval_idx, int) else eval_idx
+        self.eval_idx = [(idx if idx >= 0 else num_layers + idx) for idx in eval_idx]
+        self.max_eval_idx = max(self.eval_idx)
+        assert self.max_eval_idx < num_layers, (
+            f"eval_idx must be less than num_layers, got {eval_idx} and {num_layers}"
+        )
+
         self.up, self.reg_scale, self.reg_max = up, reg_scale, reg_max
 
         self.layers = nn.ModuleList(
-            [copy.deepcopy(decoder_layer) for _ in range(self.eval_idx + 1)]
-            + [copy.deepcopy(decoder_layer_wide) for _ in range(num_layers - self.eval_idx - 1)]
+            [copy.deepcopy(decoder_layer) for _ in range(self.max_eval_idx + 1)]
+            + [copy.deepcopy(decoder_layer_wide) for _ in range(num_layers - self.max_eval_idx - 1)]
         )
         self.lqe_layers = nn.ModuleList([copy.deepcopy(LQE(4, 64, 2, reg_max)) for _ in range(num_layers)])
 
@@ -355,8 +362,8 @@ class TransformerDecoder(nn.Module):
 
     def convert_to_deploy(self) -> None:
         self.project = weighting_function(self.reg_max, self.up, self.reg_scale, deploy=True)
-        self.layers = self.layers[: self.eval_idx + 1]
-        self.lqe_layers = nn.ModuleList([nn.Identity()] * (self.eval_idx) + [self.lqe_layers[self.eval_idx]])
+        self.layers = self.layers[: self.max_eval_idx + 1]
+        self.lqe_layers = nn.ModuleList([nn.Identity()] * self.max_eval_idx + [self.lqe_layers[self.max_eval_idx]])
 
     def forward(
         self,
@@ -392,7 +399,7 @@ class TransformerDecoder(nn.Module):
             ref_points_input = ref_points_detach.unsqueeze(2)
             query_pos_embed = query_pos_head(ref_points_detach).clamp(min=-10, max=10)
 
-            if i >= self.eval_idx + 1 and self.layer_scale > 1:
+            if i >= self.max_eval_idx + 1 and self.layer_scale > 1:
                 query_pos_embed = F.interpolate(query_pos_embed, scale_factor=self.layer_scale)
                 value = self.value_op(memory, None, query_pos_embed.shape[-1], memory_mask, spatial_shapes)
                 output = F.interpolate(output, size=query_pos_embed.shape[-1])
@@ -416,7 +423,7 @@ class TransformerDecoder(nn.Module):
             pred_corners = bbox_head[i](output + output_detach) + pred_corners_undetach
             inter_ref_bbox = distance2bbox(ref_points_initial, integral(pred_corners, project), reg_scale)
 
-            if self.training or i == self.eval_idx:
+            if self.training or i in self.eval_idx:
                 scores = score_head[i](output)
                 scores = self.lqe_layers[i](scores, pred_corners)
 
@@ -465,7 +472,7 @@ class DFINETransformer(nn.Module):
         box_noise_scale: float = 1.0,
         learn_query_content: bool = False,
         eval_spatial_size: Optional[tuple[int, int]] = None,
-        eval_idx: int = -1,
+        eval_idx: Union[int, list[int]] = -1,
         eps: float = 1e-2,
         aux_loss: bool = True,
         cross_attn_method: str = "default",
@@ -565,15 +572,23 @@ class DFINETransformer(nn.Module):
         self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3)
 
         # decoder head
-        self.eval_idx = eval_idx if eval_idx >= 0 else num_layers + eval_idx
+        eval_idx = [eval_idx] if isinstance(eval_idx, int) else eval_idx
+        self.eval_idx = [(idx if idx >= 0 else num_layers + idx) for idx in eval_idx]
+        self.max_eval_idx = max(eval_idx) if eval_idx else num_layers - 1
+
+        assert self.max_eval_idx < num_layers, f"eval_idx must be in range(0, {num_layers}), got {eval_idx}"
+
         self.dec_score_head = nn.ModuleList(
-            [nn.Linear(hidden_dim, num_classes) for _ in range(self.eval_idx + 1)]
-            + [nn.Linear(scaled_dim, num_classes) for _ in range(num_layers - self.eval_idx - 1)]
+            [nn.Linear(hidden_dim, num_classes) for _ in range(self.max_eval_idx + 1)]
+            + [nn.Linear(scaled_dim, num_classes) for _ in range(num_layers - self.max_eval_idx - 1)]
         )
         self.pre_bbox_head = MLP(hidden_dim, hidden_dim, 4, 3)
         self.dec_bbox_head = nn.ModuleList(
-            [MLP(hidden_dim, hidden_dim, 4 * (self.reg_max + 1), 3) for _ in range(self.eval_idx + 1)]
-            + [MLP(scaled_dim, scaled_dim, 4 * (self.reg_max + 1), 3) for _ in range(num_layers - self.eval_idx - 1)]
+            [MLP(hidden_dim, hidden_dim, 4 * (self.reg_max + 1), 3) for _ in range(self.max_eval_idx + 1)]
+            + [
+                MLP(scaled_dim, scaled_dim, 4 * (self.reg_max + 1), 3)
+                for _ in range(num_layers - self.max_eval_idx - 1)
+            ]
         )
         self.integral = Integral(self.reg_max)
 
@@ -586,9 +601,14 @@ class DFINETransformer(nn.Module):
         self._reset_parameters(feat_channels)
 
     def convert_to_deploy(self) -> None:
-        self.dec_score_head = nn.ModuleList([nn.Identity()] * self.eval_idx + [self.dec_score_head[self.eval_idx]])
+        self.dec_score_head = nn.ModuleList(
+            [nn.Identity()] * self.max_eval_idx + [self.dec_score_head[self.max_eval_idx]]
+        )
         self.dec_bbox_head = nn.ModuleList(
-            [self.dec_bbox_head[i] if i <= self.eval_idx else nn.Identity() for i in range(len(self.dec_bbox_head))]
+            [
+                self.dec_bbox_head[i] if i <= self.max_eval_idx else nn.Identity()
+                for i in range(len(self.dec_bbox_head))
+            ]
         )
 
     def _reset_parameters(self, feat_channels: list[int]) -> None:
