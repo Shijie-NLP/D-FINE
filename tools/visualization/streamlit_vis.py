@@ -34,7 +34,11 @@ mscoco_category2name = {
 mscoco_category2label = {k: i for i, k in enumerate(mscoco_category2name.keys())}
 mscoco_label2category = {v: k for k, v in mscoco_category2label.items()}
 
-WINDOWS_DATASET_DIR = Path(r"D:\datasets\fiftyone\coco-2017\validation\data")
+DATASET_DIR = (
+    Path("~/Data/datasets/coco/val2017").expanduser()
+    if sys.platform == "linux"
+    else Path(r"D:\datasets\fiftyone\coco-2017\validation\data")
+)
 
 SMALL_THR = 32**2
 LARGE_THR = 96**2
@@ -83,11 +87,11 @@ def load_cache(cache_path: str):
 
 @st.cache_data(show_spinner="Loading Image...", max_entries=50)
 def load_image(img_path_str: str):
+    img_path = DATASET_DIR / Path(img_path_str).name
     try:
-        img_path = WINDOWS_DATASET_DIR / Path(img_path_str).name if sys.platform == "win32" else Path(img_path_str)
         return Image.open(img_path).convert("RGB")
     except Exception as e:
-        st.error(f"Failed to load image at {img_path_str}: {e}")
+        st.error(f"Failed to load image at {img_path}: {e}")
         st.stop()
 
 
@@ -96,8 +100,8 @@ def build_figure(
     sample,
     img_width,
     img_height,
-    selected_layer,
-    available_layers,
+    layer_idx,
+    layers_flow,
     show_gt,
     selected_gt_indices,
     score_threshold,
@@ -168,12 +172,14 @@ def build_figure(
             )
 
     # --- 绘制模型预测 (Query Boxes) ---
-    if selected_layer != available_layers[0]:
-        boxes, full_scores = _extract_layer_data(sample, selected_layer)
+    if layer_idx != 0:
+        boxes, full_scores = _extract_layer_data(sample, layers_flow[layer_idx])
 
         # Ensure numpy
         boxes = np.array(boxes)
         full_scores = np.array(full_scores)
+
+        original_indices = np.arange(len(full_scores))
 
         max_scores = full_scores.max(-1)
         sort_idx = max_scores.argsort()[::-1]
@@ -182,6 +188,8 @@ def build_figure(
         valid_mask = max_scores >= score_threshold
         boxes = boxes[valid_mask][:top_k_limit]
         full_scores = full_scores[valid_mask][:top_k_limit]
+
+        original_indices = original_indices[valid_mask][:top_k_limit]  # 过滤索引
 
         num_valid = len(boxes)
         if num_valid > 0:
@@ -199,6 +207,8 @@ def build_figure(
             ]
 
             size_cats = _get_size_categories_vectorized(boxes)
+
+            hover_labels = [f"Query ID: {idx}" for idx in original_indices]
 
             if show_all_boxes:
                 bg_mask = np.arange(num_valid) != safe_idx
@@ -225,13 +235,14 @@ def build_figure(
                     x=cxs,
                     y=cys,
                     mode="markers",
+                    text=hover_labels,
+                    hoverinfo="text",
                     marker=dict(
                         color=pt_colors,
                         size=pt_sizes,
                         line=dict(color="white", width=pt_lines),
                         symbol=pt_symbols,
                     ),
-                    hoverinfo="skip",
                     showlegend=False,
                 )
             )
@@ -261,6 +272,7 @@ def build_figure(
         margin=dict(l=0, r=0, t=0, b=0),
         hovermode="closest",
         dragmode="pan",
+        uirevision=st.session_state.img_idx,
     )
 
     return fig, inspect_info
@@ -275,14 +287,14 @@ def _extract_layer_data(sample, selected_layer):
     elif selected_layer == "Decoder Init (Pre)":
         return sample["pre_boxes"], sample["pre_scores"]
     elif selected_layer.startswith("Decoder Aux Layer"):
-        l_idx = int(selected_layer.split()[-1])
+        l_idx = int(selected_layer.split()[-1]) - 1
         return sample["aux_boxes"][l_idx], sample["aux_scores"][l_idx]
     raise ValueError(f"Invalid layer: {selected_layer}")
 
 
 def init_session_state():
     """Initializes global state variables."""
-    defaults = {"img_idx": 0, "top_k_limit": 300, "canvas_scale": 1.5, "selected_layer": "None (GT Only)"}
+    defaults = {"img_idx": 0, "canvas_scale": 1.5, "score_confidence": 0.0, "topk_limit": 300, "layer_idx": 0}
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
@@ -313,18 +325,21 @@ def main():
             st.sidebar.error(f"❌ File '{input_name}' not found.")
 
     # --- Display UI ---
-    sample = all_results[st.session_state.img_idx]
-
-    st.sidebar.markdown("---")
     st.session_state.canvas_scale = st.sidebar.slider(
         "Canvas Scale", 1.0, 2.0, value=st.session_state.canvas_scale, step=0.1
     )
-    score_threshold = st.sidebar.slider(
-        "Confidence Threshold", 0.0, 1.0, value=0.0, step=0.01, key=f"score_threshold_{st.session_state.img_idx}"
+    st.session_state.score_confidence = st.sidebar.slider(
+        "Confidence Threshold",
+        0.0,
+        1.0,
+        value=st.session_state.score_confidence,
+        step=0.1,
     )
-    top_k_limit = st.sidebar.slider(
-        "Max Visible Queries", 10, 300, value=300, step=10, key=f"top_k_limit_{st.session_state.img_idx}"
+    st.session_state.topk_limit = st.sidebar.slider(
+        "Max Visible Queries", 10, 300, value=st.session_state.topk_limit, step=10
     )
+
+    sample = all_results[st.session_state.img_idx]
 
     st.sidebar.markdown("---")
     show_gt = st.sidebar.checkbox("Show Ground Truth (GT)", value=True, key=f"show_gt_{st.session_state.img_idx}")
@@ -344,22 +359,32 @@ def main():
         selected_gt_indices = [int(item.split(":")[0]) for item in selected_gt_instances]
 
     # --- Layer Selection UI ---
-    available_layers = ["None (GT Only)"]
-    if "enc_boxes" in sample:
-        available_layers.append("Encoder Aux Layer")
-    if "pre_boxes" in sample:
-        available_layers.append("Decoder Init (Pre)")
-    if "aux_boxes" in sample:
-        available_layers.extend([f"Decoder Aux Layer {i + 1}" for i in range(len(sample["aux_boxes"]))])
-    available_layers.append("Final Output")
-
     st.sidebar.markdown("---")
-    current_layer_idx = available_layers.index(st.session_state.selected_layer)
-    st.session_state.selected_layer = st.sidebar.selectbox(
-        "🔍 Select Network Layer",
-        available_layers,
-        index=current_layer_idx,
+    st.sidebar.markdown("### 🔄 Model Internal Flow")
+
+    layers_flow = ["None (GT Only)"]
+    if "enc_boxes" in sample:
+        layers_flow.append("Encoder Aux Layer")
+    if "pre_boxes" in sample:
+        layers_flow.append("Decoder Init (Pre)")
+    if "aux_boxes" in sample:
+        layers_flow.extend([f"Decoder Aux Layer {i + 1}" for i in range(len(sample["aux_boxes"]))])
+    layers_flow.append("Final Output")
+
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("⬅️ Prev") and st.session_state.layer_idx > 0:
+            st.session_state.layer_idx -= 1
+            st.rerun()
+    with col2:
+        if st.button("Next ➡️") and st.session_state.layer_idx < len(layers_flow) - 1:
+            st.session_state.layer_idx += 1
+            st.rerun()
+
+    st.session_state.layer_idx = st.sidebar.slider(
+        "Layer Step", 0, len(layers_flow) - 1, value=st.session_state.layer_idx, step=1
     )
+    st.sidebar.info(f"📍 Current: **{layers_flow[st.session_state.layer_idx]}**")
 
     # --- Data Loading & Validation ---
     img = load_image(input_name)
@@ -368,7 +393,7 @@ def main():
     # --- UI for specific Query isolation ---
     inspect_idx = 0
     show_all_boxes = False
-    if st.session_state.selected_layer != available_layers[0]:
+    if st.session_state.layer_idx != 0:
         st.sidebar.markdown("### 🎯 Query Isolation")
         show_all_boxes = st.sidebar.checkbox(
             "Force Show All Visible Boxes", value=False, key=f"show_all_boxes_{st.session_state.img_idx}"
@@ -384,12 +409,12 @@ def main():
         sample,
         img_width,
         img_height,
-        st.session_state.selected_layer,
-        available_layers,
+        st.session_state.layer_idx,
+        layers_flow,
         show_gt,
         selected_gt_indices,
-        score_threshold,
-        top_k_limit,
+        st.session_state.score_confidence,
+        st.session_state.topk_limit,
         st.session_state.canvas_scale,
         inspect_idx,
         show_all_boxes,
