@@ -66,85 +66,12 @@ class DFINEPostProcessor(nn.Module):
         return f"use_focal_loss={self.use_focal_loss}, num_classes={self.num_classes}, num_top_queries={self.num_top_queries}"
 
     def forward(self, outputs: dict[str, torch.Tensor], orig_target_sizes: torch.Tensor):
-        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
+        if self.export_dense:
+            return self.forward_dense_output(outputs, orig_target_sizes)
 
-        # Base scaling tensor creation
+        logits, boxes = outputs["pred_logits"], outputs["pred_boxes"]
         scale_tensor = orig_target_sizes.repeat(1, 2).unsqueeze(1)
 
-        # ---------------------------------------------------------------------
-        # BRANCH 1: DENSE EXTRACTION (For Visualization & Manifold Analysis)
-        # ---------------------------------------------------------------------
-        if self.export_dense:
-
-            def _extract_all_queries(logits_t: torch.Tensor, boxes_t: torch.Tensor):
-                b_xyxy = torchvision.ops.box_convert(boxes_t, in_fmt="cxcywh", out_fmt="xyxy")
-                b_xyxy.mul_(scale_tensor)
-
-                if self.use_focal_loss:
-                    full_scores = logits_t.sigmoid()
-                else:
-                    full_scores = logits_t.softmax(dim=-1)[..., :-1]
-
-                max_scores, labels_idx = full_scores.max(dim=-1)
-
-                if self.remap_mscoco_category:
-                    labels_idx = self.mscoco_mapping[labels_idx]
-
-                return b_xyxy, labels_idx, max_scores, full_scores
-
-            # Extract for all layers
-            final_boxes, final_labels, final_scores, final_full = _extract_all_queries(logits, boxes)
-
-            enc_aux_data = pre_data = aux_data = None
-
-            if "enc_aux_outputs" in outputs:
-                enc_aux_data = [
-                    _extract_all_queries(aux["pred_logits"], aux["pred_boxes"]) for aux in outputs["enc_aux_outputs"]
-                ]
-
-            if "pre_outputs" in outputs and "pred_boxes" in outputs["pre_outputs"]:
-                pre_data = _extract_all_queries(
-                    outputs["pre_outputs"]["pred_logits"], outputs["pre_outputs"]["pred_boxes"]
-                )
-
-            if "aux_outputs" in outputs:
-                aux_data = [
-                    _extract_all_queries(aux["pred_logits"], aux["pred_boxes"]) for aux in outputs["aux_outputs"]
-                ]
-
-            results = []
-            for i in range(len(final_labels)):
-                res_dict = {
-                    "labels": final_labels[i],
-                    "boxes": final_boxes[i],
-                    "scores": final_scores[i],
-                    "full_scores": final_full[i],
-                }
-
-                if enc_aux_data:
-                    res_dict["enc_aux_boxes"] = torch.stack([d[0][i] for d in enc_aux_data], dim=0)
-                    res_dict["enc_aux_labels"] = torch.stack([d[1][i] for d in enc_aux_data], dim=0)
-                    res_dict["enc_aux_scores"] = torch.stack([d[2][i] for d in enc_aux_data], dim=0)
-                    res_dict["enc_aux_full_scores"] = torch.stack([d[3][i] for d in enc_aux_data], dim=0)
-
-                if pre_data:
-                    res_dict["pre_boxes"] = pre_data[0][i]
-                    res_dict["pre_labels"] = pre_data[1][i]
-                    res_dict["pre_scores"] = pre_data[2][i]
-                    res_dict["pre_full_scores"] = pre_data[3][i]
-
-                if aux_data:
-                    res_dict["aux_boxes"] = torch.stack([d[0][i] for d in aux_data], dim=0)
-                    res_dict["aux_labels"] = torch.stack([d[1][i] for d in aux_data], dim=0)
-                    res_dict["aux_scores"] = torch.stack([d[2][i] for d in aux_data], dim=0)
-                    res_dict["aux_full_scores"] = torch.stack([d[3][i] for d in aux_data], dim=0)
-
-                results.append(res_dict)
-            return results
-
-        # ---------------------------------------------------------------------
-        # BRANCH 2: STANDARD TOP-K (For Evaluation, mAP, and Deployment)
-        # ---------------------------------------------------------------------
         bbox_pred = torchvision.ops.box_convert(boxes, in_fmt="cxcywh", out_fmt="xyxy")
         bbox_pred.mul_(scale_tensor)
 
@@ -183,6 +110,58 @@ class DFINEPostProcessor(nn.Module):
             results.append(res_dict)
 
         return results
+
+    def forward_dense_output(self, outputs, orig_target_sizes):
+        """
+        Optimized dense extraction: Returns a SINGLE dictionary of batched tensors.
+        Shapes are strictly maintained as [B, N, ...] or [B, L, N, ...] to guarantee
+        C-level memory contiguity and zero Python-loop overhead.
+        """
+
+        scale_tensor = orig_target_sizes.repeat(1, 2).unsqueeze(1)
+
+        res_dict = {}
+
+        def _extract_all_queries(logits_t: torch.Tensor, boxes_t: torch.Tensor):
+            # boxes_t: [B, N, 4], logits_t: [B, N, C]
+            b_xyxy = torchvision.ops.box_convert(boxes_t, in_fmt="cxcywh", out_fmt="xyxy")
+            b_xyxy.mul_(scale_tensor)
+
+            if self.use_focal_loss:
+                scores = logits_t.sigmoid()
+            else:
+                scores = logits_t.softmax(dim=-1)[..., :-1]
+
+            # Return a dictionary of contiguous batched tensors
+            return {"boxes": b_xyxy, "scores": scores}
+
+        if "enc_aux_outputs" in outputs:
+            enc_aux_extracted = _extract_all_queries(
+                outputs["enc_aux_outputs"][0]["pred_logits"], outputs["enc_aux_outputs"][0]["pred_boxes"]
+            )
+            for k, v in enc_aux_extracted.items():
+                res_dict[f"enc_{k}"] = v
+
+        if "pre_outputs" in outputs and "pred_boxes" in outputs["pre_outputs"]:
+            pre_data = _extract_all_queries(
+                outputs["pre_outputs"]["pred_logits"], outputs["pre_outputs"]["pred_boxes"]
+            )
+            for k, v in pre_data.items():
+                res_dict[f"pre_{k}"] = v
+
+        if "aux_outputs" in outputs:
+            aux_extracted = [
+                _extract_all_queries(aux["pred_logits"], aux["pred_boxes"]) for aux in outputs["aux_outputs"]
+            ]
+            for k in aux_extracted[0].keys():
+                # Stack along dim=1 to create the Layer dimension, resulting in [B, L, N, ...]
+                res_dict[f"aux_{k}"] = torch.stack([layer_data[k] for layer_data in aux_extracted], dim=1)
+
+        pred_output = _extract_all_queries(outputs["pred_logits"], outputs["pred_boxes"])
+        for k, v in pred_output.items():
+            res_dict[f"final_{k}"] = v
+
+        return res_dict
 
     def deploy(self):
         self.eval()
