@@ -48,14 +48,16 @@ SIZE_COLORS = {
 st.set_page_config(page_title="D-FINE Explorer", layout="wide")
 
 
-def _get_size_category(x1: float, y1: float, x2: float, y2: float) -> str:
-    """Categorizes bounding box sizes strictly according to COCO standards."""
-    area = (x2 - x1) * (y2 - y1)
-    if area < SMALL_THR:
-        return "small"
-    elif area < LARGE_THR:
-        return "medium"
-    return "large"
+def _get_size_categories_vectorized(boxes):
+    """Vectorized calculation of size categories for an array of boxes strictly according to COCO standards."""
+    if len(boxes) == 0:
+        return np.array([])
+    # boxes shape: (N, 4) -> x1, y1, x2, y2
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    categories = np.full(areas.shape, "large", dtype=object)
+    categories[areas < LARGE_THR] = "medium"
+    categories[areas < SMALL_THR] = "small"
+    return categories
 
 
 def _get_topk_numpy(scores_array, k=3):
@@ -65,8 +67,9 @@ def _get_topk_numpy(scores_array, k=3):
     return topk_scores, topk_idx
 
 
-@st.cache_data(show_spinner="Loading Inference Cache...")
+@st.cache_resource(show_spinner="Loading Inference Cache (Zero-Copy)...")
 def load_cache(cache_path: str):
+    """Uses cache_resource to prevent Streamlit from deep-copying the potentially massive pickle file."""
     if not os.path.exists(cache_path):
         st.error(f"Cache file {cache_path} not found.")
         st.stop()
@@ -96,40 +99,69 @@ def build_figure(
     selected_layer,
     available_layers,
     show_gt,
-    selected_gt_indices,  # 🌟 改为传入索引列表
+    selected_gt_indices,
     score_threshold,
     top_k_limit,
     canvas_scale,
     inspect_idx,
     show_all_boxes,
 ):
-    """Constructs the rigid-coordinate Plotly figure."""
+    """Constructs the rigid-coordinate Plotly figure using vectorized operations."""
     fig = go.Figure()
-
     inspect_info = None
 
-    # --- 绘制 Ground Truth ---
-    if show_gt and len(selected_gt_indices) > 0:
-        for i, (box, label_id) in enumerate(zip(sample["gt_boxes"], sample["gt_labels"])):
-            # 🌟 实例级过滤
-            if i not in selected_gt_indices:
-                continue
+    def add_vectorized_boxes(boxes_array, color, line_width=1):
+        """Helper function to render multiple boxes as a single Scatter trace separated by None."""
+        if len(boxes_array) == 0:
+            return
 
+        x_lines, y_lines = [], []
+        for box in boxes_array:
             x1, y1, x2, y2 = box.tolist()
+            x_lines.extend([x1, x2, x2, x1, x1, None])
+            y_lines.extend([y1, y1, y2, y2, y1, None])
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_lines,
+                y=y_lines,
+                mode="lines",
+                line=dict(color=color, width=line_width),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    if show_gt and len(selected_gt_indices) > 0:
+        # Convert to numpy array safely in case they are lists or tensors
+        gt_boxes_all = np.array(sample["gt_boxes"])
+        gt_labels_all = np.array(sample["gt_labels"])
+
+        gt_boxes = gt_boxes_all[selected_gt_indices]
+        gt_labels = gt_labels_all[selected_gt_indices]
+        size_cats = _get_size_categories_vectorized(gt_boxes)
+
+        for cat in ["small", "medium", "large"]:
+            mask = size_cats == cat
+            add_vectorized_boxes(gt_boxes[mask], SIZE_COLORS[cat], line_width=2)
+
+        text_x, text_y, texts, colors = [], [], [], []
+        for orig_idx, box, label_id, cat in zip(selected_gt_indices, gt_boxes, gt_labels, size_cats):
             label_name = mscoco_category2name[mscoco_label2category[label_id]]
-            box_color = SIZE_COLORS[_get_size_category(x1, y1, x2, y2)]
+            text_x.append(box[0])
+            text_y.append(box[1])
+            texts.append(f"[{orig_idx}] {label_name}")
+            colors.append(SIZE_COLORS[cat])
 
-            fig.add_shape(type="rect", x0=x1, y0=y1, x1=x2, y1=y2, line=dict(color=box_color, width=2), layer="above")
-
-            # 🌟 文本标签也带上索引，方便在侧边栏对应
+        if texts:
             fig.add_trace(
                 go.Scatter(
-                    x=[x1],
-                    y=[y1],
-                    text=[f"[{i}] {label_name}"],  # 显示如 [0] person
+                    x=text_x,
+                    y=text_y,
+                    text=texts,
                     mode="text",
                     textposition="top right",
-                    textfont=dict(color=box_color, size=14, weight="bold"),
+                    textfont=dict(color=colors, size=14, weight="bold"),
                     showlegend=False,
                     hoverinfo="skip",
                 )
@@ -139,21 +171,24 @@ def build_figure(
     if selected_layer != available_layers[0]:
         boxes, full_scores = _extract_layer_data(sample, selected_layer)
 
+        # Ensure numpy
+        boxes = np.array(boxes)
+        full_scores = np.array(full_scores)
+
         max_scores = full_scores.max(-1)
         sort_idx = max_scores.argsort()[::-1]
         boxes, full_scores, max_scores = boxes[sort_idx], full_scores[sort_idx], max_scores[sort_idx]
 
         valid_mask = max_scores >= score_threshold
-        boxes, full_scores = boxes[valid_mask][:top_k_limit], full_scores[valid_mask][:top_k_limit]
+        boxes = boxes[valid_mask][:top_k_limit]
+        full_scores = full_scores[valid_mask][:top_k_limit]
 
-        num_valid = len(full_scores)
+        num_valid = len(boxes)
         if num_valid > 0:
-            valid_x, valid_y, point_colors = [], [], []
-
-            # 🌟 关键：对当前被 Inspect 的点进行 Top-5 提取
             safe_idx = min(inspect_idx, num_valid - 1)
             target_score = full_scores[safe_idx]
             top5_vals, top5_ids = _get_topk_numpy(target_score, k=5)
+
             inspect_info = [
                 {
                     "Rank": f"#{i + 1}",
@@ -163,40 +198,44 @@ def build_figure(
                 for i, (val, lbl) in enumerate(zip(top5_vals, top5_ids))
             ]
 
-            for i, (box, score) in enumerate(zip(boxes, full_scores)):
-                x1, y1, x2, y2 = box.tolist()
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                size_cat = _get_size_category(x1, y1, x2, y2)
+            size_cats = _get_size_categories_vectorized(boxes)
 
-                valid_x.append(cx)
-                valid_y.append(cy)
-                point_colors.append(SIZE_COLORS[size_cat])
+            if show_all_boxes:
+                bg_mask = np.arange(num_valid) != safe_idx
+                for cat in ["small", "medium", "large"]:
+                    cat_mask = (size_cats == cat) & bg_mask
+                    add_vectorized_boxes(boxes[cat_mask], SIZE_COLORS[cat], line_width=1)
 
-                if show_all_boxes or i == safe_idx:
-                    color = "rgba(0, 255, 0, 1.0)" if i == safe_idx else SIZE_COLORS[size_cat]
-                    width = 5 if i == safe_idx else 1
-                    fig.add_shape(
-                        type="rect", x0=x1, y0=y1, x1=x2, y1=y2, line=dict(color=color, width=width), layer="above"
-                    )
+            # Highlighting the inspected box
+            add_vectorized_boxes(boxes[safe_idx : safe_idx + 1], "rgba(0, 255, 0, 1.0)", line_width=4)
 
-            # 4. 绘制中心点 (🌟 彻底移除 Hover 逻辑)
+            # Center points
+            cxs = (boxes[:, 0] + boxes[:, 2]) / 2
+            cys = (boxes[:, 1] + boxes[:, 3]) / 2
+
+            pt_colors = [SIZE_COLORS[cat] for cat in size_cats]
+            pt_sizes = [14 if j == safe_idx else 6 for j in range(num_valid)]
+            pt_lines = [1.5 if j == safe_idx else 0.5 for j in range(num_valid)]
+            pt_symbols = ["circle-dot" if j == safe_idx else "circle" for j in range(num_valid)]
+
+            pt_colors[safe_idx] = "rgba(0, 255, 0, 1.0)"
+
             fig.add_trace(
                 go.Scatter(
-                    x=valid_x,
-                    y=valid_y,
+                    x=cxs,
+                    y=cys,
                     mode="markers",
                     marker=dict(
-                        color=point_colors,
-                        size=[14 if j == safe_idx else 6 for j in range(num_valid)],
-                        line=dict(color="white", width=[1.5 if j == safe_idx else 0.5 for j in range(num_valid)]),
-                        symbol=["circle-dot" if j == safe_idx else "circle" for j in range(num_valid)],
+                        color=pt_colors,
+                        size=pt_sizes,
+                        line=dict(color="white", width=pt_lines),
+                        symbol=pt_symbols,
                     ),
-                    hoverinfo="skip",  # 🌟 禁用所有 Hover 交互
+                    hoverinfo="skip",
                     showlegend=False,
                 )
             )
 
-    # --- 统一刚性坐标系配置 ---
     fig.update_layout(
         images=[
             dict(
@@ -292,19 +331,16 @@ def main():
 
     selected_gt_indices = []
     if show_gt:
-        # 🌟 构建实例级描述列表： "0: person", "1: tv", ...
         gt_instances = [
             f"{i}: {mscoco_category2name[mscoco_label2category[label]]}" for i, label in enumerate(sample["gt_labels"])
         ]
 
-        # 🌟 实例拾取器：默认全选所有实例
         selected_gt_instances = st.sidebar.multiselect(
             "Select Specific GT Instances",
             options=gt_instances,
             default=gt_instances,
             key=f"gt_instance_filter_{st.session_state.img_idx}",
         )
-        # 解析出选中的索引整数
         selected_gt_indices = [int(item.split(":")[0]) for item in selected_gt_instances]
 
     # --- Layer Selection UI ---
@@ -329,7 +365,7 @@ def main():
     img = load_image(input_name)
     img_width, img_height = img.size
 
-    # --- UI for specific Query isolation (Must happen before render) ---
+    # --- UI for specific Query isolation ---
     inspect_idx = 0
     show_all_boxes = False
     if st.session_state.selected_layer != available_layers[0]:
