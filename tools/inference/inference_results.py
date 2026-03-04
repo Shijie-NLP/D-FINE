@@ -107,7 +107,7 @@ def main(args):
             # Deterministically slice the batched tensors along the Batch dimension (dim=0)
             sample_dict = {k: v[idx] for k, v in batched_results.items()}
 
-            orig_h, orig_w = targets[idx]["orig_size"].tolist()
+            orig_w, orig_h = targets[idx]["orig_size"].tolist()
             gt_dict = {
                 "boxes": scale_boxes(
                     targets[idx]["boxes"],
