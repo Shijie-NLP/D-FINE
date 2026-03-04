@@ -106,6 +106,8 @@ def build_figure(
     """Constructs the rigid-coordinate Plotly figure."""
     fig = go.Figure()
 
+    inspect_info = None
+
     # --- 绘制 Ground Truth ---
     if show_gt and len(selected_gt_indices) > 0:
         for i, (box, label_id) in enumerate(zip(sample["gt_boxes"], sample["gt_labels"])):
@@ -144,66 +146,52 @@ def build_figure(
         valid_mask = max_scores >= score_threshold
         boxes, full_scores = boxes[valid_mask][:top_k_limit], full_scores[valid_mask][:top_k_limit]
 
-        if len(full_scores) > 0:
-            valid_x, valid_y, hover_texts, point_colors, point_indices = [], [], [], [], []
+        num_valid = len(full_scores)
+        if num_valid > 0:
+            valid_x, valid_y, point_colors = [], [], []
+
+            # 🌟 关键：对当前被 Inspect 的点进行 Top-5 提取
+            safe_idx = min(inspect_idx, num_valid - 1)
+            target_score = full_scores[safe_idx]
+            top5_vals, top5_ids = _get_topk_numpy(target_score, k=5)
+            inspect_info = [
+                {
+                    "Rank": f"#{i + 1}",
+                    "Class": mscoco_category2name.get(mscoco_label2category.get(lbl, -1), "N/A"),
+                    "Score": round(float(val), 4),
+                }
+                for i, (val, lbl) in enumerate(zip(top5_vals, top5_ids))
+            ]
 
             for i, (box, score) in enumerate(zip(boxes, full_scores)):
                 x1, y1, x2, y2 = box.tolist()
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-
-                # 1. 尺度颜色区分 (与 GT 保持一致)
                 size_cat = _get_size_category(x1, y1, x2, y2)
-                base_color = SIZE_COLORS[size_cat]
-
-                # 2. Top-K 信息用于 Hover
-                topk_scores, topk_labels = _get_topk_numpy(score, k=3)
-                label_names = [
-                    mscoco_category2name.get(mscoco_label2category.get(lbl, -1), "N/A") for lbl in topk_labels
-                ]
-                label_details = "<br>".join([f"{n}: {s:.3f}" for n, s in zip(label_names, topk_scores)])
 
                 valid_x.append(cx)
                 valid_y.append(cy)
-                point_colors.append(base_color)
-                point_indices.append(str(i))  # 用于点中心的数字显示
-                hover_texts.append(f"<b>Query #{i}</b> ({size_cat})<br>{label_details}")
+                point_colors.append(SIZE_COLORS[size_cat])
 
-                # 3. 只有特定条件下才绘制 Bounding Box
-                if show_all_boxes or i == inspect_idx:
-                    # 如果是被选中的点，边框加粗加亮
-                    box_line_color = "rgba(0, 255, 0, 1.0)" if i == inspect_idx else base_color
-                    box_width = 3 if i == inspect_idx else 1
+                if show_all_boxes or i == safe_idx:
+                    color = "rgba(0, 255, 0, 1.0)" if i == safe_idx else SIZE_COLORS[size_cat]
+                    width = 5 if i == safe_idx else 1
                     fig.add_shape(
-                        type="rect",
-                        x0=x1,
-                        y0=y1,
-                        x1=x2,
-                        y1=y2,
-                        line=dict(color=box_line_color, width=box_width),
-                        layer="above",
+                        type="rect", x0=x1, y0=y1, x1=x2, y1=y2, line=dict(color=color, width=width), layer="above"
                     )
 
-            # 4. 绘制中心点及其内部索引
+            # 4. 绘制中心点 (🌟 彻底移除 Hover 逻辑)
             fig.add_trace(
                 go.Scatter(
                     x=valid_x,
                     y=valid_y,
-                    mode="markers",  # 🌟 移除了 text 模式，彻底清爽
+                    mode="markers",
                     marker=dict(
                         color=point_colors,
-                        # 🌟 动态尺寸逻辑：普通点 6px (极小)，选中点 14px (醒目)
-                        size=[14 if j == inspect_idx else 6 for j in range(len(full_scores))],
-                        line=dict(
-                            color="white",
-                            # 选中点增加外白圈厚度，增强对比
-                            width=[1.5 if j == inspect_idx else 0.5 for j in range(len(full_scores))],
-                        ),
-                        # 🌟 选中点改用特殊符号（如星形或带点圆），从几何形状上进行二次区分
-                        symbol=["circle-dot" if j == inspect_idx else "circle" for j in range(len(full_scores))],
+                        size=[14 if j == safe_idx else 6 for j in range(num_valid)],
+                        line=dict(color="white", width=[1.5 if j == safe_idx else 0.5 for j in range(num_valid)]),
+                        symbol=["circle-dot" if j == safe_idx else "circle" for j in range(num_valid)],
                     ),
-                    hoverinfo="text",
-                    hovertext=hover_texts,  # 详细信息保留在 Hover 中
-                    name="Query Centers",
+                    hoverinfo="skip",  # 🌟 禁用所有 Hover 交互
                     showlegend=False,
                 )
             )
@@ -235,7 +223,8 @@ def build_figure(
         hovermode="closest",
         dragmode="pan",
     )
-    return fig, len(boxes) if selected_layer != available_layers[0] else 0
+
+    return fig, inspect_info
 
 
 def _extract_layer_data(sample, selected_layer):
@@ -344,19 +333,17 @@ def main():
     inspect_idx = 0
     show_all_boxes = False
     if st.session_state.selected_layer != available_layers[0]:
-        st.sidebar.markdown("---")
         st.sidebar.markdown("### 🎯 Query Isolation")
         show_all_boxes = st.sidebar.checkbox(
             "Force Show All Visible Boxes", value=False, key=f"show_all_boxes_{st.session_state.img_idx}"
         )
-        # Dummy slider first, actual max value updated inside the render logic but Streamlit reads top-down.
-        # We handle this by safely passing a default max, as Streamlit UI state updates on interaction.
+
         inspect_idx = st.sidebar.number_input(
             "Inspect Specific Query Index", min_value=0, value=0, step=1, key=f"inspect_idx_{st.session_state.img_idx}"
         )
 
     # --- Build and Render ---
-    fig, num_valid = build_figure(
+    fig, inspect_info = build_figure(
         img,
         sample,
         img_width,
@@ -371,6 +358,11 @@ def main():
         inspect_idx,
         show_all_boxes,
     )
+
+    if inspect_info:
+        with st.sidebar:
+            st.markdown(f"#### 📊 Top 5 for Query #{inspect_idx}")
+            st.table(inspect_info)
 
     st.plotly_chart(
         fig, width="content", config={"scrollZoom": True, "displayModeBar": True, "doubleClick": "reset+autosize"}
