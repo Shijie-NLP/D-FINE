@@ -9,11 +9,10 @@ minimized CPU overhead during multi-processing data loading.
 """
 
 import os
-import random
-from collections import defaultdict
 from typing import Any, Callable, Optional
 
 import faster_coco_eval.core.mask as coco_mask
+import numpy as np
 import torch
 from faster_coco_eval.utils.pytorch import FasterCocoDetection
 from PIL import Image
@@ -170,42 +169,49 @@ class StratifiedCocoSubset(CocoDetection):
         self.seed = seed
 
         # Replace self.ids with the stratified subset
-        self.ids = self._build_stratified_subset(subset_ratio, seed)
+        self.ids = self.get_balanced_subset(subset_ratio, seed)
 
-    def _build_stratified_subset(self, ratio: float, seed: int) -> list[int]:
-        """
-        Core stratified sampling logic.
+    def get_balanced_subset(self, ratio=0.2, seed=42):
+        rng = np.random.default_rng(seed)
 
-        Steps:
-          1. Build a map: category_id -> list of image_ids containing that category.
-          2. For each category, sample `ratio` fraction of its image_ids.
-          3. Union all sampled image_ids (preserves multi-label images naturally).
-          4. Intersect with self.ids (respects any upstream filtering).
-          5. Sort for determinism.
-        """
-        rng = random.Random(seed)
+        # 1. 计算目标总数
+        total_target = int(len(self.ids) * ratio)
+        sampled_ids = set()
 
-        # Step 1: category -> image_ids mapping (using the loaded COCO API)
-        cat_to_imgs: dict[int, list[int]] = defaultdict(list)
-        for cat_id, img_ids in self.coco.catToImgs.items():
-            # catToImgs may contain duplicates, deduplicate per category
-            cat_to_imgs[cat_id] = list(set(img_ids))
+        # 2. 统计每个类别的稀有程度（包含图片越少的类越优先）
+        # cat_to_imgs: {cat_id: [img_id1, img_id2, ...]}
+        cat_counts = {cat_id: len(img_ids) for cat_id, img_ids in self.coco.catToImgs.items()}
+        sorted_cats = sorted(cat_counts.keys(), key=lambda x: cat_counts[x])
 
-        # Step 2: stratified sampling per category
-        sampled_ids: set[int] = set()
-        for cat_id, img_ids in cat_to_imgs.items():
-            img_ids_sorted = sorted(img_ids)  # sort for determinism before shuffle
-            rng.shuffle(img_ids_sorted)
-            n_sample = max(1, round(len(img_ids_sorted) * ratio))
-            sampled_ids.update(img_ids_sorted[:n_sample])
+        # 3. 预估每个类别应有的配额 (目标总数 * 该类在全集中的占比)
+        cat_targets = {cat_id: max(1, int(len(img_ids) * ratio)) for cat_id, img_ids in self.coco.catToImgs.items()}
+        current_cat_counts = dict.fromkeys(self.coco.catToImgs.keys(), 0)
 
-        # Step 3: intersect with original self.ids (handles val/train split correctly)
-        valid_ids = set(self.ids)
-        final_ids = sorted(sampled_ids & valid_ids)
+        # 4. 第一轮：贪心处理稀有类别
+        for cat_id in sorted_cats:
+            img_ids = list(self.coco.catToImgs[cat_id])
+            rng.shuffle(img_ids)
 
-        # Sanity report
+            for img_id in img_ids:
+                if len(sampled_ids) >= total_target:
+                    break
+
+                # 如果这张图还没被选中，且该类别还没达标
+                if img_id not in sampled_ids and current_cat_counts[cat_id] < cat_targets[cat_id]:
+                    sampled_ids.add(img_id)
+                    # 关键：选中一张图后，要更新它包含的所有类别的计数
+                    for c in self.coco.imgToAnns[img_id]:
+                        current_cat_counts[c["category_id"]] += 1
+
+        # 5. 第二轮：如果还没凑满 20%（因为重叠导致提前达标），随机补齐
+        if len(sampled_ids) < total_target:
+            remaining_ids = list(set(self.ids) - sampled_ids)
+            rng.shuffle(remaining_ids)
+            needed = total_target - len(sampled_ids)
+            sampled_ids.update(remaining_ids[:needed])
+
         total = len(self.ids)
-        kept = len(final_ids)
+        kept = len(sampled_ids)
         actual_ratio = kept / total if total > 0 else 0.0
         print(
             f"[StratifiedCocoSubset] "
@@ -214,7 +220,7 @@ class StratifiedCocoSubset(CocoDetection):
             f"seed={seed}"
         )
 
-        return final_ids
+        return sorted(sampled_ids)
 
     def extra_repr(self) -> str:
         base = super().extra_repr()
