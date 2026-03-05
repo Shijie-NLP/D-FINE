@@ -3,7 +3,7 @@ Copied from RT-DETR (https://github.com/lyuwenyu/RT-DETR)
 Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 """
 
-import torch.cuda.amp as amp
+import torch.amp as amp
 
 from ..core import register
 

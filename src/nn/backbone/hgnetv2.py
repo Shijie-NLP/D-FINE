@@ -3,18 +3,13 @@ reference
 - https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
 
 Copyright (c) 2024 The D-FINE Authors. All Rights Reserved.
-
-Refactored for strict PyTorch I/O equivalence, type safety, robust distributed
-handling, and precise PaddlePaddle SAME-padding mathematical alignment.
 """
 
-import os
-from typing import Any, Union
+import logging
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loguru import logger
 
 from ...core import register
 from ...misc.dist_utils import safe_barrier, safe_get_rank
@@ -30,56 +25,50 @@ __all__ = ["HGNetv2"]
 
 
 class LearnableAffineBlock(nn.Module):
-    """Learnable Affine Block for feature scaling and shifting."""
-
-    def __init__(self, scale_value: float = 1.0, bias_value: float = 0.0):
+    def __init__(self, scale_value=1.0, bias_value=0.0):
         super().__init__()
-        self.scale = nn.Parameter(torch.tensor([scale_value], dtype=torch.float32))
-        self.bias = nn.Parameter(torch.tensor([bias_value], dtype=torch.float32))
+        self.scale = nn.Parameter(torch.tensor([scale_value]), requires_grad=True)
+        self.bias = nn.Parameter(torch.tensor([bias_value]), requires_grad=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.scale * x + self.bias
 
 
 class ConvBNAct(nn.Module):
-    """Standard Convolution -> BatchNorm -> Activation sequence."""
-
     def __init__(
         self,
-        in_chs: int,
-        out_chs: int,
-        kernel_size: int,
-        stride: int = 1,
-        groups: int = 1,
-        padding: str = "",
-        use_act: bool = True,
-        use_lab: bool = False,
+        in_chs,
+        out_chs,
+        kernel_size,
+        stride=1,
+        groups=1,
+        padding="",
+        use_act=True,
+        use_lab=False,
     ):
         super().__init__()
-
+        self.use_act = use_act
+        self.use_lab = use_lab
         if padding == "same":
-            # Native 'same' padding requires stride=1 in PyTorch Conv2d.
-            # Using ZeroPad2d explicitly to handle edge cases precisely matching original behavior.
             self.conv = nn.Sequential(
-                nn.ZeroPad2d((0, 1, 0, 1)),
+                nn.ZeroPad2d([0, 1, 0, 1]),
                 nn.Conv2d(in_chs, out_chs, kernel_size, stride, groups=groups, bias=False),
             )
         else:
             self.conv = nn.Conv2d(
-                in_chs,
-                out_chs,
-                kernel_size,
-                stride,
-                padding=(kernel_size - 1) // 2,
-                groups=groups,
-                bias=False,
+                in_chs, out_chs, kernel_size, stride, padding=(kernel_size - 1) // 2, groups=groups, bias=False
             )
-
         self.bn = nn.BatchNorm2d(out_chs)
-        self.act = nn.ReLU(inplace=True) if use_act else nn.Identity()
-        self.lab = LearnableAffineBlock() if (use_act and use_lab) else nn.Identity()
+        if self.use_act:
+            self.act = nn.ReLU()
+        else:
+            self.act = nn.Identity()
+        if self.use_act and self.use_lab:
+            self.lab = LearnableAffineBlock()
+        else:
+            self.lab = nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.conv(x)
         x = self.bn(x)
         x = self.act(x)
@@ -88,15 +77,13 @@ class ConvBNAct(nn.Module):
 
 
 class LightConvBNAct(nn.Module):
-    """Lightweight Convolution Block leveraging point-wise and depth-wise/grouped convolutions."""
-
     def __init__(
         self,
-        in_chs: int,
-        out_chs: int,
-        kernel_size: int,
-        groups: int = 1,  # Kept for signature compatibility
-        use_lab: bool = False,
+        in_chs,
+        out_chs,
+        kernel_size,
+        groups=1,
+        use_lab=False,
     ):
         super().__init__()
         self.conv1 = ConvBNAct(in_chs, out_chs, kernel_size=1, use_act=False, use_lab=use_lab)
@@ -104,16 +91,15 @@ class LightConvBNAct(nn.Module):
             out_chs, out_chs, kernel_size=kernel_size, groups=out_chs, use_act=True, use_lab=use_lab
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
         return x
 
 
 class StemBlock(nn.Module):
-    """Stem Block for initial feature extraction and downsampling."""
-
-    def __init__(self, in_chs: int, mid_chs: int, out_chs: int, use_lab: bool = False):
+    # for HGNetv2
+    def __init__(self, in_chs, mid_chs, out_chs, use_lab=False):
         super().__init__()
         self.stem1 = ConvBNAct(in_chs, mid_chs, kernel_size=3, stride=2, use_lab=use_lab)
         self.stem2a = ConvBNAct(mid_chs, mid_chs // 2, kernel_size=2, stride=1, use_lab=use_lab)
@@ -122,143 +108,132 @@ class StemBlock(nn.Module):
         self.stem4 = ConvBNAct(mid_chs, out_chs, kernel_size=1, stride=1, use_lab=use_lab)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=1, ceil_mode=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.stem1(x)
-
-        # Specific asymmetric padding usually from PaddlePaddle's SAME padding translation
-        x_pad = F.pad(x, (0, 1, 0, 1))
-        x2 = self.stem2a(x_pad)
+        x = F.pad(x, (0, 1, 0, 1))
+        x2 = self.stem2a(x)
         x2 = F.pad(x2, (0, 1, 0, 1))
         x2 = self.stem2b(x2)
-
         x1 = self.pool(x)
-        x_cat = torch.cat([x1, x2], dim=1)
-
-        out = self.stem3(x_cat)
-        out = self.stem4(out)
-        return out
+        x = torch.cat([x1, x2], dim=1)
+        x = self.stem3(x)
+        x = self.stem4(x)
+        return x
 
 
 class EseModule(nn.Module):
-    """Effective Squeeze-and-Excitation Module."""
-
-    def __init__(self, chs: int):
+    def __init__(self, chs):
         super().__init__()
         self.conv = nn.Conv2d(chs, chs, kernel_size=1, stride=1, padding=0)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         identity = x
-        # Replaced manual mean with PyTorch idiomatic adaptive_avg_pool2d
-        se = F.adaptive_avg_pool2d(x, 1)
-        se = self.conv(se)
-        se = self.sigmoid(se)
-        return identity * se
+        x = x.mean((2, 3), keepdim=True)
+        x = self.conv(x)
+        x = self.sigmoid(x)
+        return torch.mul(identity, x)
 
 
 class HG_Block(nn.Module):
-    """Hierarchical Generative Block (HG-Block)."""
-
     def __init__(
         self,
-        in_chs: int,
-        mid_chs: int,
-        out_chs: int,
-        layer_num: int,
-        kernel_size: int = 3,
-        residual: bool = False,
-        light_block: bool = False,
-        use_lab: bool = False,
-        agg: str = "ese",
-        drop_path: float = 0.0,
+        in_chs,
+        mid_chs,
+        out_chs,
+        layer_num,
+        kernel_size=3,
+        residual=False,
+        light_block=False,
+        use_lab=False,
+        agg="ese",
+        drop_path=0.0,
     ):
         super().__init__()
         self.residual = residual
 
         self.layers = nn.ModuleList()
         for i in range(layer_num):
-            layer_in_chs = in_chs if i == 0 else mid_chs
             if light_block:
-                self.layers.append(LightConvBNAct(layer_in_chs, mid_chs, kernel_size=kernel_size, use_lab=use_lab))
+                self.layers.append(
+                    LightConvBNAct(in_chs if i == 0 else mid_chs, mid_chs, kernel_size=kernel_size, use_lab=use_lab)
+                )
             else:
                 self.layers.append(
-                    ConvBNAct(layer_in_chs, mid_chs, kernel_size=kernel_size, stride=1, use_lab=use_lab)
+                    ConvBNAct(
+                        in_chs if i == 0 else mid_chs, mid_chs, kernel_size=kernel_size, stride=1, use_lab=use_lab
+                    )
                 )
 
+        # feature aggregation
         total_chs = in_chs + layer_num * mid_chs
-
         if agg == "se":
-            self.aggregation = nn.Sequential(
-                ConvBNAct(total_chs, out_chs // 2, kernel_size=1, stride=1, use_lab=use_lab),
-                ConvBNAct(out_chs // 2, out_chs, kernel_size=1, stride=1, use_lab=use_lab),
-            )
+            aggregation_squeeze_conv = ConvBNAct(total_chs, out_chs // 2, kernel_size=1, stride=1, use_lab=use_lab)
+            aggregation_excitation_conv = ConvBNAct(out_chs // 2, out_chs, kernel_size=1, stride=1, use_lab=use_lab)
+            self.aggregation = nn.Sequential(aggregation_squeeze_conv, aggregation_excitation_conv)
         else:
-            self.aggregation = nn.Sequential(
-                ConvBNAct(total_chs, out_chs, kernel_size=1, stride=1, use_lab=use_lab),
-                EseModule(out_chs),
-            )
+            aggregation_conv = ConvBNAct(total_chs, out_chs, kernel_size=1, stride=1, use_lab=use_lab)
+            att = EseModule(out_chs)
+            self.aggregation = nn.Sequential(aggregation_conv, att)
 
-        self.drop_path = nn.Dropout(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = nn.Dropout(drop_path) if drop_path else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         identity = x
-        features = [x]
+        output = [x]
         for layer in self.layers:
             x = layer(x)
-            features.append(x)
-
-        x_cat = torch.cat(features, dim=1)
-        out = self.aggregation(x_cat)
-
+            output.append(x)
+        x = torch.cat(output, dim=1)
+        x = self.aggregation(x)
         if self.residual:
-            out = self.drop_path(out) + identity
-        return out
+            x = self.drop_path(x) + identity
+        return x
 
 
 class HG_Stage(nn.Module):
-    """Hierarchical Generative Stage composed of multiple HG_Blocks."""
-
     def __init__(
         self,
-        in_chs: int,
-        mid_chs: int,
-        out_chs: int,
-        block_num: int,
-        layer_num: int,
-        downsample: bool = True,
-        light_block: bool = False,
-        kernel_size: int = 3,
-        use_lab: bool = False,
-        agg: str = "se",
-        drop_path: Union[float, list[float]] = 0.0,
+        in_chs,
+        mid_chs,
+        out_chs,
+        block_num,
+        layer_num,
+        downsample=True,
+        light_block=False,
+        kernel_size=3,
+        use_lab=False,
+        agg="se",
+        drop_path=0.0,
     ):
         super().__init__()
-        self.downsample = (
-            ConvBNAct(in_chs, in_chs, kernel_size=3, stride=2, groups=in_chs, use_act=False, use_lab=use_lab)
-            if downsample
-            else nn.Identity()
-        )
+        self.downsample = downsample
+        if downsample:
+            self.downsample = ConvBNAct(
+                in_chs, in_chs, kernel_size=3, stride=2, groups=in_chs, use_act=False, use_lab=use_lab
+            )
+        else:
+            self.downsample = nn.Identity()
 
         blocks_list = []
         for i in range(block_num):
-            dp_rate = drop_path[i] if isinstance(drop_path, (list, tuple)) else drop_path
             blocks_list.append(
                 HG_Block(
-                    in_chs=in_chs if i == 0 else out_chs,
-                    mid_chs=mid_chs,
-                    out_chs=out_chs,
-                    layer_num=layer_num,
-                    residual=(i != 0),
+                    in_chs if i == 0 else out_chs,
+                    mid_chs,
+                    out_chs,
+                    layer_num,
+                    residual=False if i == 0 else True,
                     kernel_size=kernel_size,
                     light_block=light_block,
                     use_lab=use_lab,
                     agg=agg,
-                    drop_path=dp_rate,
+                    drop_path=drop_path[i] if isinstance(drop_path, (list, tuple)) else drop_path,
                 )
             )
         self.blocks = nn.Sequential(*blocks_list)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         x = self.downsample(x)
         x = self.blocks(x)
         return x
@@ -267,23 +242,21 @@ class HG_Stage(nn.Module):
 @register()
 class HGNetv2(nn.Module):
     """
-    HGNetV2 Backbone Network.
-
+    HGNetV2
     Args:
-        name: str. Architecture variant name (e.g., 'B0', 'B1').
-        use_lab: bool. Whether to use LearnableAffineBlock.
-        return_idx: list. Indices of stages whose features should be returned.
-        freeze_stem_only: bool. Whether to freeze only the stem or subsequent stages as well.
-        freeze_at: int. The stage index at which to stop freezing parameters.
-        freeze_norm: bool. Whether to convert BatchNorm layers to FrozenBatchNorm.
-        pretrained: bool. Whether to load pretrained weights.
-        local_model_dir: str. Local directory to cache downloaded weights.
+        stem_channels: list. Number of channels for the stem block.
+        stage_type: str. The stage configuration of HGNet. such as the number of channels, stride, etc.
+        use_lab: boolean. Whether to use LearnableAffineBlock in network.
+        lr_mult_list: list. Control the learning rate of different stages.
+    Returns:
+        model: nn.Layer. Specific HGNetV2 model depends on args.
     """
 
-    ARCH_CONFIGS: dict[str, Any] = {
+    arch_configs = {
         "B0": {
             "stem_channels": [3, 16, 16],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [16, 16, 64, 1, False, False, 3, 3],
                 "stage2": [64, 32, 256, 1, True, False, 3, 3],
                 "stage3": [256, 64, 512, 2, True, True, 5, 3],
@@ -294,6 +267,7 @@ class HGNetv2(nn.Module):
         "B1": {
             "stem_channels": [3, 24, 32],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [32, 32, 64, 1, False, False, 3, 3],
                 "stage2": [64, 48, 256, 1, True, False, 3, 3],
                 "stage3": [256, 96, 512, 2, True, True, 5, 3],
@@ -304,6 +278,7 @@ class HGNetv2(nn.Module):
         "B2": {
             "stem_channels": [3, 24, 32],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [32, 32, 96, 1, False, False, 3, 4],
                 "stage2": [96, 64, 384, 1, True, False, 3, 4],
                 "stage3": [384, 128, 768, 3, True, True, 5, 4],
@@ -314,6 +289,7 @@ class HGNetv2(nn.Module):
         "B3": {
             "stem_channels": [3, 24, 32],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [32, 32, 128, 1, False, False, 3, 5],
                 "stage2": [128, 64, 512, 1, True, False, 3, 5],
                 "stage3": [512, 128, 1024, 3, True, True, 5, 5],
@@ -324,6 +300,7 @@ class HGNetv2(nn.Module):
         "B4": {
             "stem_channels": [3, 32, 48],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [48, 48, 128, 1, False, False, 3, 6],
                 "stage2": [128, 96, 512, 1, True, False, 3, 6],
                 "stage3": [512, 192, 1024, 3, True, True, 5, 6],
@@ -334,6 +311,7 @@ class HGNetv2(nn.Module):
         "B5": {
             "stem_channels": [3, 32, 64],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [64, 64, 128, 1, False, False, 3, 6],
                 "stage2": [128, 128, 512, 2, True, False, 3, 6],
                 "stage3": [512, 256, 1024, 5, True, True, 5, 6],
@@ -344,6 +322,7 @@ class HGNetv2(nn.Module):
         "B6": {
             "stem_channels": [3, 48, 96],
             "stage_config": {
+                # in_channels, mid_channels, out_channels, num_blocks, downsample, light_block, kernel_size, layer_num
                 "stage1": [96, 96, 192, 2, False, False, 3, 6],
                 "stage2": [192, 192, 512, 3, True, False, 3, 6],
                 "stage3": [512, 384, 1024, 6, True, True, 5, 6],
@@ -355,27 +334,22 @@ class HGNetv2(nn.Module):
 
     def __init__(
         self,
-        name: str,
-        use_lab: bool = False,
-        return_idx: list[int] = [1, 2, 3],
-        freeze_stem_only: bool = True,
-        freeze_at: int = 0,
-        freeze_norm: bool = True,
-        pretrained: bool = True,
-        local_model_dir: str = "weight/hgnetv2/",
+        name,
+        use_lab=False,
+        return_idx=[1, 2, 3],
+        freeze_stem_only=True,
+        freeze_at=0,
+        freeze_norm=True,
+        pretrained=True,
+        local_model_dir="weight/hgnetv2/",
     ):
         super().__init__()
-
-        if name not in self.ARCH_CONFIGS:
-            raise ValueError(f"Unsupported HGNetv2 architecture name: {name}")
-
         self.use_lab = use_lab
         self.return_idx = return_idx
 
-        config = self.ARCH_CONFIGS[name]
-        stem_channels = config["stem_channels"]
-        stage_config = config["stage_config"]
-        download_url = config["url"]
+        stem_channels = self.arch_configs[name]["stem_channels"]
+        stage_config = self.arch_configs[name]["stage_config"]
+        download_url = self.arch_configs[name]["url"]
 
         self._out_strides = [4, 8, 16, 32]
         self._out_channels = [stage_config[k][2] for k in stage_config]
@@ -390,20 +364,28 @@ class HGNetv2(nn.Module):
 
         # stages
         self.stages = nn.ModuleList()
-        for k in stage_config:
-            (in_ch, mid_ch, out_ch, blk_num, downsample, light_blk, k_size, layer_num) = stage_config[k]
-
+        for i, k in enumerate(stage_config):
+            (
+                in_channels,
+                mid_channels,
+                out_channels,
+                block_num,
+                downsample,
+                light_block,
+                kernel_size,
+                layer_num,
+            ) = stage_config[k]
             self.stages.append(
                 HG_Stage(
-                    in_chs=in_ch,
-                    mid_chs=mid_ch,
-                    out_chs=out_ch,
-                    block_num=blk_num,
-                    layer_num=layer_num,
-                    downsample=downsample,
-                    light_block=light_blk,
-                    kernel_size=k_size,
-                    use_lab=use_lab,
+                    in_channels,
+                    mid_channels,
+                    out_channels,
+                    block_num,
+                    layer_num,
+                    downsample,
+                    light_block,
+                    kernel_size,
+                    use_lab,
                 )
             )
 
@@ -417,59 +399,73 @@ class HGNetv2(nn.Module):
             self._freeze_norm(self)
 
         if pretrained:
-            self._load_pretrained(name, download_url, local_model_dir)
+            RED, GREEN, RESET = "\033[91m", "\033[92m", "\033[0m"
+            try:
+                # If the file doesn't exist locally, download from the URL
+                if safe_get_rank() == 0:
+                    print(
+                        GREEN
+                        + "If the pretrained HGNetV2 can't be downloaded automatically. Please check your network connection."
+                        + RESET
+                    )
+                    print(
+                        GREEN
+                        + "Please check your network connection. Or download the model manually from "
+                        + RESET
+                        + f"{download_url}"
+                        + GREEN
+                        + " to "
+                        + RESET
+                        + f"{local_model_dir}."
+                        + RESET
+                    )
+                    state = torch.hub.load_state_dict_from_url(
+                        download_url, map_location="cpu", model_dir=local_model_dir
+                    )
+                    print(f"Loaded stage1 {name} HGNetV2 from URL.")
 
-    def _freeze_norm(self, module: nn.Module) -> None:
-        """Recursively replace BatchNorm2d with FrozenBatchNorm2d."""
-        for name, child in module.named_children():
-            if isinstance(child, nn.BatchNorm2d):
-                frozen_bn = FrozenBatchNorm2d(child.num_features)
-                # Copy running stats and weights if they exist before replacing
-                frozen_bn.load_state_dict(child.state_dict(), strict=False)
-                setattr(module, name, frozen_bn)
-            else:
-                self._freeze_norm(child)
+                # Wait for rank 0 to download the model
+                safe_barrier()
 
-    def _freeze_parameters(self, m: nn.Module) -> None:
-        """Disable gradient computation for all parameters in a module."""
+                # All processes load the downloaded model
+                model_path = local_model_dir + "PPHGNetV2_" + name + "_stage1.pth"
+                state = torch.load(model_path, map_location="cpu")
+
+                self.load_state_dict(state)
+                print(f"Loaded stage1 {name} HGNetV2 from URL.")
+
+            except (Exception, KeyboardInterrupt) as e:
+                if safe_get_rank() == 0:
+                    print(f"{str(e)}")
+                    logging.error(RED + "CRITICAL WARNING: Failed to load pretrained HGNetV2 model" + RESET)
+                    logging.error(
+                        GREEN
+                        + "Please check your network connection. Or download the model manually from "
+                        + RESET
+                        + f"{download_url}"
+                        + GREEN
+                        + " to "
+                        + RESET
+                        + f"{local_model_dir}."
+                        + RESET
+                    )
+                exit()
+
+    def _freeze_norm(self, m: nn.Module):
+        if isinstance(m, nn.BatchNorm2d):
+            m = FrozenBatchNorm2d(m.num_features)
+        else:
+            for name, child in m.named_children():
+                _child = self._freeze_norm(child)
+                if _child is not child:
+                    setattr(m, name, _child)
+        return m
+
+    def _freeze_parameters(self, m: nn.Module):
         for p in m.parameters():
             p.requires_grad = False
 
-    def _load_pretrained(self, name: str, download_url: str, local_model_dir: str) -> None:
-        """Handle distributed-safe downloading and loading of pretrained weights."""
-        model_filename = f"PPHGNetV2_{name}_stage1.pth"
-        model_path = os.path.join(local_model_dir, model_filename)
-
-        try:
-            if safe_get_rank() == 0:
-                if not os.path.exists(model_path):
-                    logger.info(f"Downloading pretrained HGNetV2 {name} from {download_url}...")
-                    # Let torch.hub handle the download cache
-                    torch.hub.load_state_dict_from_url(
-                        download_url, map_location="cpu", model_dir=local_model_dir, file_name=model_filename
-                    )
-                logger.info(f"Successfully located stage1 {name} HGNetV2 weights.")
-
-            safe_barrier()  # Block other processes until rank 0 finishes downloading
-
-            # Load the state dict. Using strict=False just in case, though it usually aligns perfectly.
-            state = torch.load(model_path, map_location="cpu", weights_only=True)
-            self.load_state_dict(state)
-
-            if safe_get_rank() == 0:
-                logger.info(f"Loaded stage1 {name} HGNetV2 from {model_path}.")
-
-        except Exception as e:
-            error_msg = (
-                f"Failed to load pretrained HGNetV2 model.\n"
-                f"URL: {download_url}\n"
-                f"Local Path: {model_path}\n"
-                f"Error: {str(e)}"
-            )
-            logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
-
-    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+    def forward(self, x):
         x = self.stem(x)
         outs = []
         for idx, stage in enumerate(self.stages):
