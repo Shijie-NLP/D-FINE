@@ -6,12 +6,10 @@ Copyright(c) 2023 lyuwenyu. All Rights Reserved.
 import torch
 import torch.nn as nn
 
-from ..misc import MetricLogger, SmoothedValue, reduce_dict
+from ..misc.logger import MetricLogger, SmoothedValue, reduce_dict
 
 
-def train_one_epoch(
-    model: nn.Module, criterion: nn.Module, dataloader, optimizer, ema, epoch, device
-):
+def train_one_epoch(model: nn.Module, criterion: nn.Module, dataloader, optimizer, ema, epoch, device):
     """ """
     model.train()
 
@@ -34,9 +32,7 @@ def train_one_epoch(
         if ema is not None:
             ema.update(model)
 
-        loss_reduced_values = {
-            k: v.item() for k, v in reduce_dict({"loss": loss}).items()
-        }
+        loss_reduced_values = {k: v.item() for k, v in reduce_dict({"loss": loss}).items()}
         metric_logger.update(**loss_reduced_values)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
