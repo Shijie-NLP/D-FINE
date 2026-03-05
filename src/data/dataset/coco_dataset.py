@@ -9,6 +9,8 @@ minimized CPU overhead during multi-processing data loading.
 """
 
 import os
+import random
+from collections import defaultdict
 from typing import Any, Callable, Optional
 
 import faster_coco_eval.core.mask as coco_mask
@@ -116,6 +118,109 @@ class CocoDetection(FasterCocoDetection, DetDataset):
     @property
     def label2category(self) -> dict[int, int]:
         return {i: cat["id"] for i, cat in enumerate(self.categories)}
+
+
+@register()
+class StratifiedCocoSubset(CocoDetection):
+    """
+    A stratified 20% subset of CocoDetection for rapid idea validation.
+
+    Compared to naive num_samples truncation, this ensures:
+      1. Every category is represented proportionally.
+      2. Multi-label images (containing multiple categories) are preserved naturally.
+      3. The subset is reproducible across runs via `seed`.
+
+    Typical speedup vs full COCO: ~5x on training time per epoch.
+
+    Args:
+        img_folder:            Path to COCO image directory.
+        ann_file:              Path to COCO annotation JSON.
+        transforms:            Transform pipeline (same as CocoDetection).
+        return_masks:          Whether to return segmentation masks.
+        remap_mscoco_category: Whether to remap to contiguous label space.
+        subset_ratio:          Fraction of images to keep (default 0.2).
+        seed:                  Random seed for reproducibility (default 42).
+    """
+
+    __inject__ = ["transforms"]
+    __share__ = ["remap_mscoco_category"]
+
+    def __init__(
+        self,
+        img_folder: str,
+        ann_file: str,
+        transforms: Optional[Callable] = None,
+        return_masks: bool = False,
+        remap_mscoco_category: bool = False,
+        subset_ratio: float = 0.2,
+        seed: int = 42,
+    ) -> None:
+        # Initialize the full dataset first (populates self.coco and self.ids)
+        super().__init__(
+            img_folder=img_folder,
+            ann_file=ann_file,
+            transforms=transforms,
+            return_masks=return_masks,
+            remap_mscoco_category=remap_mscoco_category,
+            num_samples=None,  # Load everything first, then we filter
+        )
+
+        assert 0.0 < subset_ratio <= 1.0, f"subset_ratio must be in (0, 1], got {subset_ratio}"
+        self.subset_ratio = subset_ratio
+        self.seed = seed
+
+        # Replace self.ids with the stratified subset
+        self.ids = self._build_stratified_subset(subset_ratio, seed)
+
+    def _build_stratified_subset(self, ratio: float, seed: int) -> list[int]:
+        """
+        Core stratified sampling logic.
+
+        Steps:
+          1. Build a map: category_id -> list of image_ids containing that category.
+          2. For each category, sample `ratio` fraction of its image_ids.
+          3. Union all sampled image_ids (preserves multi-label images naturally).
+          4. Intersect with self.ids (respects any upstream filtering).
+          5. Sort for determinism.
+        """
+        rng = random.Random(seed)
+
+        # Step 1: category -> image_ids mapping (using the loaded COCO API)
+        cat_to_imgs: dict[int, list[int]] = defaultdict(list)
+        for cat_id, img_ids in self.coco.catToImgs.items():
+            # catToImgs may contain duplicates, deduplicate per category
+            cat_to_imgs[cat_id] = list(set(img_ids))
+
+        # Step 2: stratified sampling per category
+        sampled_ids: set[int] = set()
+        for cat_id, img_ids in cat_to_imgs.items():
+            img_ids_sorted = sorted(img_ids)  # sort for determinism before shuffle
+            rng.shuffle(img_ids_sorted)
+            n_sample = max(1, round(len(img_ids_sorted) * ratio))
+            sampled_ids.update(img_ids_sorted[:n_sample])
+
+        # Step 3: intersect with original self.ids (handles val/train split correctly)
+        valid_ids = set(self.ids)
+        final_ids = sorted(sampled_ids & valid_ids)
+
+        # Sanity report
+        total = len(self.ids)
+        kept = len(final_ids)
+        actual_ratio = kept / total if total > 0 else 0.0
+        print(
+            f"[StratifiedCocoSubset] "
+            f"total={total}, kept={kept}, "
+            f"target_ratio={ratio:.1%}, actual_ratio={actual_ratio:.1%}, "
+            f"seed={seed}"
+        )
+
+        return final_ids
+
+    def extra_repr(self) -> str:
+        base = super().extra_repr()
+        base += f"\n subset_ratio: {self.subset_ratio}"
+        base += f"\n seed: {self.seed}"
+        return base
 
 
 def convert_coco_poly_to_mask(segmentations: list[Any], height: int, width: int) -> torch.Tensor:
