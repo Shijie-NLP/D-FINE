@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from ...core import register
 
+
 __all__ = ["Classification", "ClassHead"]
 
 

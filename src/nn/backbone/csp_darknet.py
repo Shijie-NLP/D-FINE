@@ -57,9 +57,7 @@ class C3(nn.Module):
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1, act=act)
         self.cv2 = Conv(c1, c_, 1, 1, act=act)
-        self.m = nn.Sequential(
-            *(Bottleneck(c_, c_, shortcut, g, e=1.0, act=act) for _ in range(n))
-        )
+        self.m = nn.Sequential(*(Bottleneck(c_, c_, shortcut, g, e=1.0, act=act) for _ in range(n)))
         self.cv3 = Conv(2 * c_, c2, 1, act=act)
 
     def forward(self, x):
@@ -145,32 +143,20 @@ class CSPPAN(nn.Module):
         "depth_multi",
     ]
 
-    def __init__(
-        self, in_channels=[256, 512, 1024], depth_multi=1.0, act="silu"
-    ) -> None:
+    def __init__(self, in_channels=[256, 512, 1024], depth_multi=1.0, act="silu") -> None:
         super().__init__()
         depth = max(round(3 * depth_multi), 1)
 
         self.out_channels = in_channels
         self.fpn_stems = nn.ModuleList(
-            [
-                Conv(cin, cout, 1, 1, act=act)
-                for cin, cout in zip(in_channels[::-1], in_channels[::-1][1:])
-            ]
+            [Conv(cin, cout, 1, 1, act=act) for cin, cout in zip(in_channels[::-1], in_channels[::-1][1:])]
         )
         self.fpn_csps = nn.ModuleList(
-            [
-                C3(cin, cout, depth, False, act=act)
-                for cin, cout in zip(in_channels[::-1], in_channels[::-1][1:])
-            ]
+            [C3(cin, cout, depth, False, act=act) for cin, cout in zip(in_channels[::-1], in_channels[::-1][1:])]
         )
 
-        self.pan_stems = nn.ModuleList(
-            [Conv(c, c, 3, 2, act=act) for c in in_channels[:-1]]
-        )
-        self.pan_csps = nn.ModuleList(
-            [C3(c, c, depth, False, act=act) for c in in_channels[1:]]
-        )
+        self.pan_stems = nn.ModuleList([Conv(c, c, 3, 2, act=act) for c in in_channels[:-1]])
+        self.pan_csps = nn.ModuleList([C3(c, c, depth, False, act=act) for c in in_channels[1:]])
 
     def forward(self, feats):
         fpn_feats = []

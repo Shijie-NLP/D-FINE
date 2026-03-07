@@ -9,6 +9,7 @@ import torchvision
 from ...core import register
 from .utils import IntermediateLayerGetter
 
+
 __all__ = ["TorchVisionModel"]
 
 

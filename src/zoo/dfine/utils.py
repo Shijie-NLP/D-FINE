@@ -24,9 +24,7 @@ def bias_init_with_prob(prior_prob=0.01):
     return bias_init
 
 
-def deformable_attention_core_func(
-    value, value_spatial_shapes, sampling_locations, attention_weights
-):
+def deformable_attention_core_func(value, value_spatial_shapes, sampling_locations, attention_weights):
     """
     Args:
         value (Tensor): [bs, value_length, n_head, c]
@@ -47,13 +45,9 @@ def deformable_attention_core_func(
     sampling_value_list = []
     for level, (h, w) in enumerate(value_spatial_shapes):
         # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
-        value_l_ = (
-            value_list[level].flatten(2).permute(0, 2, 1).reshape(bs * n_head, c, h, w)
-        )
+        value_l_ = value_list[level].flatten(2).permute(0, 2, 1).reshape(bs * n_head, c, h, w)
         # N_, Lq_, M_, P_, 2 -> N_, M_, Lq_, P_, 2 -> N_*M_, Lq_, P_, 2
-        sampling_grid_l_ = (
-            sampling_grids[:, :, :, level].permute(0, 2, 1, 3, 4).flatten(0, 1)
-        )
+        sampling_grid_l_ = sampling_grids[:, :, :, level].permute(0, 2, 1, 3, 4).flatten(0, 1)
         # N_*M_, D_, Lq_, P_
         sampling_value_l_ = F.grid_sample(
             value_l_,
@@ -64,9 +58,7 @@ def deformable_attention_core_func(
         )
         sampling_value_list.append(sampling_value_l_)
     # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_*M_, 1, Lq_, L_*P_)
-    attention_weights = attention_weights.permute(0, 2, 1, 3, 4).reshape(
-        bs * n_head, 1, Len_q, n_levels * n_points
-    )
+    attention_weights = attention_weights.permute(0, 2, 1, 3, 4).reshape(bs * n_head, 1, Len_q, n_levels * n_points)
     output = (
         (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
         .sum(-1)
@@ -124,34 +116,24 @@ def deformable_attention_core_func_v2(
 
         elif method == "discrete":
             # n * m, seq, n, 2
-            sampling_coord = (
-                sampling_grid_l * torch.tensor([[w, h]], device=value_l.device) + 0.5
-            ).to(torch.int64)
+            sampling_coord = (sampling_grid_l * torch.tensor([[w, h]], device=value_l.device) + 0.5).to(torch.int64)
 
             # FIX ME? for rectangle input
             sampling_coord = sampling_coord.clamp(0, h - 1)
-            sampling_coord = sampling_coord.reshape(
-                bs * n_head, Len_q * num_points_list[level], 2
-            )
+            sampling_coord = sampling_coord.reshape(bs * n_head, Len_q * num_points_list[level], 2)
 
             s_idx = (
                 torch.arange(sampling_coord.shape[0], device=value_l.device)
                 .unsqueeze(-1)
                 .repeat(1, sampling_coord.shape[1])
             )
-            sampling_value_l: torch.Tensor = value_l[
-                s_idx, :, sampling_coord[..., 1], sampling_coord[..., 0]
-            ]  # n l c
+            sampling_value_l: torch.Tensor = value_l[s_idx, :, sampling_coord[..., 1], sampling_coord[..., 0]]  # n l c
 
-            sampling_value_l = sampling_value_l.permute(0, 2, 1).reshape(
-                bs * n_head, c, Len_q, num_points_list[level]
-            )
+            sampling_value_l = sampling_value_l.permute(0, 2, 1).reshape(bs * n_head, c, Len_q, num_points_list[level])
 
         sampling_value_list.append(sampling_value_l)
 
-    attn_weights = attention_weights.permute(0, 2, 1, 3).reshape(
-        bs * n_head, 1, Len_q, sum(num_points_list)
-    )
+    attn_weights = attention_weights.permute(0, 2, 1, 3).reshape(bs * n_head, 1, Len_q, sum(num_points_list))
     weighted_sample_locs = torch.concat(sampling_value_list, dim=-1) * attn_weights
     output = weighted_sample_locs.sum(-1).reshape(bs, n_head * c, Len_q)
 

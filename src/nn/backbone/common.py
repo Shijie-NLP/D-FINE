@@ -8,9 +8,7 @@ import torch.nn as nn
 
 
 class ConvNormLayer(nn.Module):
-    def __init__(
-        self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None
-    ):
+    def __init__(self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None):
         super().__init__()
         self.conv = nn.Conv2d(
             ch_in,

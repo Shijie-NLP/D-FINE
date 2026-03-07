@@ -29,13 +29,7 @@ def weighting_function(reg_max, up, reg_scale, deploy=False):
         step = (upper_bound1 + 1) ** (2 / (reg_max - 2))
         left_values = [-((step) ** i) + 1 for i in range(reg_max // 2 - 1, 0, -1)]
         right_values = [(step) ** i - 1 for i in range(1, reg_max // 2)]
-        values = (
-            [-upper_bound2]
-            + left_values
-            + [torch.zeros_like(up[0][None])]
-            + right_values
-            + [upper_bound2]
-        )
+        values = [-upper_bound2] + left_values + [torch.zeros_like(up[0][None])] + right_values + [upper_bound2]
         return torch.tensor(values, dtype=up.dtype, device=up.device)
     else:
         upper_bound1 = abs(up[0]) * abs(reg_scale)
@@ -43,13 +37,7 @@ def weighting_function(reg_max, up, reg_scale, deploy=False):
         step = (upper_bound1 + 1) ** (2 / (reg_max - 2))
         left_values = [-((step) ** i) + 1 for i in range(reg_max // 2 - 1, 0, -1)]
         right_values = [(step) ** i - 1 for i in range(1, reg_max // 2)]
-        values = (
-            [-upper_bound2]
-            + left_values
-            + [torch.zeros_like(up[0][None])]
-            + right_values
-            + [upper_bound2]
-        )
+        values = [-upper_bound2] + left_values + [torch.zeros_like(up[0][None])] + right_values + [upper_bound2]
         return torch.cat(values, 0)
 
 
@@ -132,18 +120,10 @@ def distance2bbox(points, distance, reg_scale):
         Tensor: Bounding boxes in (N, 4) or (B, N, 4) format [cx, cy, w, h].
     """
     reg_scale = abs(reg_scale)
-    x1 = points[..., 0] - (0.5 * reg_scale + distance[..., 0]) * (
-        points[..., 2] / reg_scale
-    )
-    y1 = points[..., 1] - (0.5 * reg_scale + distance[..., 1]) * (
-        points[..., 3] / reg_scale
-    )
-    x2 = points[..., 0] + (0.5 * reg_scale + distance[..., 2]) * (
-        points[..., 2] / reg_scale
-    )
-    y2 = points[..., 1] + (0.5 * reg_scale + distance[..., 3]) * (
-        points[..., 3] / reg_scale
-    )
+    x1 = points[..., 0] - (0.5 * reg_scale + distance[..., 0]) * (points[..., 2] / reg_scale)
+    y1 = points[..., 1] - (0.5 * reg_scale + distance[..., 1]) * (points[..., 3] / reg_scale)
+    x2 = points[..., 0] + (0.5 * reg_scale + distance[..., 2]) * (points[..., 2] / reg_scale)
+    y2 = points[..., 1] + (0.5 * reg_scale + distance[..., 3]) * (points[..., 3] / reg_scale)
 
     bboxes = torch.stack([x1, y1, x2, y2], -1)
 
@@ -166,22 +146,12 @@ def bbox2distance(points, bbox, reg_max, reg_scale, up, eps=0.1):
         Tensor: Decoded distances.
     """
     reg_scale = abs(reg_scale)
-    left = (points[:, 0] - bbox[:, 0]) / (
-        points[..., 2] / reg_scale + 1e-16
-    ) - 0.5 * reg_scale
-    top = (points[:, 1] - bbox[:, 1]) / (
-        points[..., 3] / reg_scale + 1e-16
-    ) - 0.5 * reg_scale
-    right = (bbox[:, 2] - points[:, 0]) / (
-        points[..., 2] / reg_scale + 1e-16
-    ) - 0.5 * reg_scale
-    bottom = (bbox[:, 3] - points[:, 1]) / (
-        points[..., 3] / reg_scale + 1e-16
-    ) - 0.5 * reg_scale
+    left = (points[:, 0] - bbox[:, 0]) / (points[..., 2] / reg_scale + 1e-16) - 0.5 * reg_scale
+    top = (points[:, 1] - bbox[:, 1]) / (points[..., 3] / reg_scale + 1e-16) - 0.5 * reg_scale
+    right = (bbox[:, 2] - points[:, 0]) / (points[..., 2] / reg_scale + 1e-16) - 0.5 * reg_scale
+    bottom = (bbox[:, 3] - points[:, 1]) / (points[..., 3] / reg_scale + 1e-16) - 0.5 * reg_scale
     four_lens = torch.stack([left, top, right, bottom], -1)
-    four_lens, weight_right, weight_left = translate_gt(
-        four_lens, reg_max, reg_scale, up
-    )
+    four_lens, weight_right, weight_left = translate_gt(four_lens, reg_max, reg_scale, up)
     if reg_max is not None:
         four_lens = four_lens.clamp(min=0, max=reg_max - eps)
     return four_lens.reshape(-1).detach(), weight_right.detach(), weight_left.detach()
