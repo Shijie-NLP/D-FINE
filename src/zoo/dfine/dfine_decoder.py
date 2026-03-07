@@ -720,8 +720,7 @@ class DFINETransformer(nn.Module):
         if self.training or self.eval_spatial_size is None:
             anchors, valid_mask = self._generate_anchors(spatial_shapes, device=memory.device)
         else:
-            anchors = self.anchors
-            valid_mask = self.valid_mask
+            anchors, valid_mask = self.anchors, self.valid_mask
 
         if memory.shape[0] > 1:
             # Expand is safer but repeat handles batch dimension generation robustly here

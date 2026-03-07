@@ -24,9 +24,7 @@ class HungarianMatcher(nn.Module):
     while the others are un-matched (and thus treated as non-objects).
     """
 
-    __share__ = [
-        "use_focal_loss",
-    ]
+    __share__ = ["use_focal_loss"]
 
     def __init__(self, weight_dict, use_focal_loss=False, alpha=0.25, gamma=2.0):
         """Creates the matcher
@@ -45,9 +43,7 @@ class HungarianMatcher(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-        assert self.cost_class != 0 or self.cost_bbox != 0 or self.cost_giou != 0, (
-            "all costs cant be 0"
-        )
+        assert self.cost_class != 0 or self.cost_bbox != 0 or self.cost_giou != 0, "all costs cant be 0"
 
     @torch.no_grad()
     def forward(self, outputs: dict[str, torch.Tensor], targets, return_topk=False):
@@ -76,9 +72,7 @@ class HungarianMatcher(nn.Module):
         if self.use_focal_loss:
             out_prob = F.sigmoid(outputs["pred_logits"].flatten(0, 1))
         else:
-            out_prob = (
-                outputs["pred_logits"].flatten(0, 1).softmax(-1)
-            )  # [batch_size * num_queries, num_classes]
+            out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
 
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
@@ -91,14 +85,8 @@ class HungarianMatcher(nn.Module):
         # The 1 is a constant that doesn't change the matching, it can be ommitted.
         if self.use_focal_loss:
             out_prob = out_prob[:, tgt_ids]
-            neg_cost_class = (
-                (1 - self.alpha)
-                * (out_prob**self.gamma)
-                * (-(1 - out_prob + 1e-8).log())
-            )
-            pos_cost_class = (
-                self.alpha * ((1 - out_prob) ** self.gamma) * (-(out_prob + 1e-8).log())
-            )
+            neg_cost_class = (1 - self.alpha) * (out_prob**self.gamma) * (-(1 - out_prob + 1e-8).log())
+            pos_cost_class = self.alpha * ((1 - out_prob) ** self.gamma) * (-(out_prob + 1e-8).log())
             cost_class = pos_cost_class - neg_cost_class
         else:
             cost_class = -out_prob[:, tgt_ids]
@@ -106,24 +94,16 @@ class HungarianMatcher(nn.Module):
         # Compute the L1 cost between boxes
         cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
 
-        # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(
-            box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox)
-        )
+        # Compute the giou cost between boxes
+        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix 3 * self.cost_bbox + 2 * self.cost_class + self.cost_giou
-        C = (
-            self.cost_bbox * cost_bbox
-            + self.cost_class * cost_class
-            + self.cost_giou * cost_giou
-        )
+        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
         C = torch.nan_to_num(C, nan=1.0)
-        indices_pre = [
-            linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))
-        ]
+        indices_pre = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
         indices = [
             (
                 torch.as_tensor(i, dtype=torch.int64),
@@ -134,11 +114,7 @@ class HungarianMatcher(nn.Module):
 
         # Compute topk indices
         if return_topk:
-            return {
-                "indices_o2m": self.get_top_k_matches(
-                    C, sizes=sizes, k=return_topk, initial_indices=indices_pre
-                )
-            }
+            return {"indices_o2m": self.get_top_k_matches(C, sizes=sizes, k=return_topk, initial_indices=indices_pre)}
 
         return {"indices": indices}  # , 'indices_o2m': C.min(-1)[1]}
 
@@ -147,9 +123,7 @@ class HungarianMatcher(nn.Module):
         # C_original = C.clone()
         for i in range(k):
             indices_k = (
-                [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-                if i > 0
-                else initial_indices
+                [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))] if i > 0 else initial_indices
             )
             indices_list.append(
                 [
