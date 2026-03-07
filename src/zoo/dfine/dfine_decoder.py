@@ -575,7 +575,7 @@ class DFINETransformer(nn.Module):
         # decoder head
         eval_idx = [eval_idx] if isinstance(eval_idx, int) else eval_idx
         self.eval_idx = [(idx if idx >= 0 else num_layers + idx) for idx in eval_idx]
-        self.max_eval_idx = max(eval_idx) if eval_idx else num_layers - 1
+        self.max_eval_idx = max(self.eval_idx)
 
         assert self.max_eval_idx < num_layers, f"eval_idx must be in range(0, {num_layers}), got {eval_idx}"
 
